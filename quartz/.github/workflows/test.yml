@@ -1,0 +1,36 @@
+name: Test Build
+
+on:
+  push:
+    branches: [main, v4]
+  pull_request:
+    branches: [main, v4]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - name: Build Quartz
+        run: npx quartz build
+
+      - name: Check build output
+        run: |
+          if [ ! -d "public" ]; then
+            echo "Build failed: public/ directory not found"
+            exit 1
+          fi
+          FILE_COUNT=$(find public -name "*.html" | wc -l)
+          echo "Built $FILE_COUNT HTML files"
+          if [ "$FILE_COUNT" -lt 1 ]; then
+            echo "Build produced no HTML files"
+            exit 1
+          fi

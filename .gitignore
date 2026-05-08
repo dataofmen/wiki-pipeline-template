@@ -1,0 +1,52 @@
+# Dependencies
+node_modules/
+
+# Quartz build output
+quartz/public/
+quartz/.quartz-cache/
+
+# OS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# Workspace temp (inter-agent handshake)
+_workspace/
+!_workspace/.gitkeep
+
+# Python
+__pycache__/
+*.pyc
+venv/
+
+# Telegram bot state
+scripts/*.session
+scripts/*.json
+!scripts/package.json
+
+# Inbox staging
+inbox/urls/*
+inbox/pdfs/*
+inbox/threads/*
+inbox/raw/*
+!inbox/urls/.gitkeep
+!inbox/pdfs/.gitkeep
+!inbox/threads/.gitkeep
+!inbox/raw/.gitkeep
+
+# Logs
+log.md
+
+# OMC
+.omc/
+
+# Claude
+.claude/settings.local.json

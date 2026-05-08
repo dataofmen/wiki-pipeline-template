@@ -1,0 +1,59 @@
+name: Deploy Wiki to GitHub Pages
+
+on:
+  push:
+    branches: [v4]
+  workflow_dispatch:
+  repository_dispatch:
+    types: [rebuild-wiki]
+  schedule:
+    - cron: '0 0 * * *'
+    - cron: '0 12 * * *'
+
+jobs:
+  build-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Checkout content repo
+        uses: actions/checkout@v4
+        with:
+          repository: {{GH_USER}}/{{REPO}}
+          token: ${{ secrets.GH_PAT }}
+          path: wikis
+
+      - name: Sync content
+        run: |
+          rm -rf content/A_wiki content/B_arscontexta content/C_trading
+          for folder in wiki garden clippings; do
+            rm -rf "content/$folder"
+            cp -r "$GITHUB_WORKSPACE/wikis/$folder" "content/$folder"
+          done
+          cp "$GITHUB_WORKSPACE/wikis/index.md" content/index.md
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - name: Build Quartz
+        run: npx quartz build
+
+      - name: Validate build output
+        run: bash scripts/validate-build.sh public
+        continue-on-error: true
+
+      - name: Deploy to GitHub Pages repo
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          personal_token: ${{ secrets.GH_PAT }}
+          external_repository: {{GH_USER}}/{{GH_USER}}.github.io
+          publish_branch: main
+          publish_dir: ./public
+          commit_message: "wiki deploy: ${{ github.sha }}"
+          force_orphan: true

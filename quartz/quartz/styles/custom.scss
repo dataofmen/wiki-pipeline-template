@@ -1,0 +1,75 @@
+@use "./base.scss";
+
+// Table of Contents in beforeBody: distinct style + working collapse
+.toc {
+  background-color: var(--highlight);
+  border: 1px solid var(--lightgray);
+  border-left: 3px solid var(--secondary);
+  border-radius: 6px;
+  padding: 0.75rem 1rem;
+  margin-bottom: 1.5rem;
+
+  // Fix collapse: hide content when collapsed (flex trick doesn't work in flow layout)
+  ul.toc-content.collapsed {
+    display: none;
+  }
+
+  button.toc-header {
+    width: 100%;
+    justify-content: space-between;
+
+    & h3 {
+      font-size: 0.85rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      color: var(--secondary);
+    }
+  }
+
+  ul.toc-content {
+    margin: 0.5rem 0 0;
+    padding: 0;
+
+    & > li > a {
+      font-size: 0.9rem;
+    }
+  }
+}
+
+// Index page: show global graph inline, large
+body[data-slug="index"] {
+  .graph {
+    > h3 {
+      display: none;
+    }
+
+    > .graph-outer {
+      display: none;
+    }
+
+    > .global-graph-outer {
+      position: relative !important;
+      width: 100% !important;
+      height: 70vh !important;
+      min-height: 500px;
+      backdrop-filter: none !important;
+      display: block !important;
+
+      &.active {
+        display: block !important;
+      }
+
+      > .global-graph-container {
+        position: relative !important;
+        top: 0 !important;
+        left: 0 !important;
+        transform: none !important;
+        width: 100% !important;
+        height: 70vh !important;
+        min-height: 500px;
+        border-radius: 8px;
+      }
+    }
+  }
+}

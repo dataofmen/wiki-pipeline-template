@@ -1,0 +1,16 @@
+{
+  "name": "create-wiki",
+  "version": "1.0.0",
+  "description": "Create a knowledge wiki with information processing pipeline",
+  "type": "module",
+  "bin": {
+    "create-wiki": "./cli.js"
+  },
+  "dependencies": {
+    "@clack/prompts": "^0.9.1",
+    "degit": "^2.8.4",
+    "picocolors": "^1.1.1"
+  },
+  "keywords": ["wiki", "knowledge-graph", "quartz", "pkm", "pipeline"],
+  "license": "MIT"
+}
