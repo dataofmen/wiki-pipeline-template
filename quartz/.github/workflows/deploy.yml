@@ -27,7 +27,6 @@ jobs:
 
       - name: Sync content
         run: |
-          rm -rf content/A_wiki content/B_arscontexta content/C_trading
           for folder in wiki garden clippings; do
             rm -rf "content/$folder"
             cp -r "$GITHUB_WORKSPACE/wikis/$folder" "content/$folder"

@@ -1,22 +1,20 @@
 """
-Inbox folder watcher - auto-triggers pipeline on new files
+Inbox folder watcher — auto-triggers Python pipeline on new files.
 Usage: python3 inbox_watcher.py
-Templated version — set CLAUDE_CLI_PATH in .env if needed
+
+Triggers pipeline.py (Phases 3-6) directly.
+Only Phase 4 (Note Maker) invokes Claude Code internally.
 """
-import os
 import time
 import subprocess
 import logging
 from pathlib import Path
-from dotenv import load_dotenv
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
-load_dotenv(Path(__file__).parent / ".env")
-
 INBOX_DIR = Path(__file__).parent.parent / "inbox"
 PROJECT_DIR = Path(__file__).parent.parent
-CLAUDE_CLI_PATH = os.environ.get("CLAUDE_CLI_PATH", "claude")
+SCRIPTS_DIR = Path(__file__).parent.parent / "scripts"
 
 logging.basicConfig(
     filename=Path(__file__).parent / "watcher.log",
@@ -44,9 +42,9 @@ class InboxHandler(FileSystemEventHandler):
     def trigger_if_ready(self):
         if self._pending and (time.time() - self._last_event) >= DEBOUNCE_SECONDS:
             self._pending = False
-            logging.info("Triggering pipeline")
+            logging.info("Triggering Python pipeline")
             subprocess.Popen(
-                [CLAUDE_CLI_PATH, "-p", "wiki-orchestrator: process inbox pipeline"],
+                ["python3", str(SCRIPTS_DIR / "pipeline.py")],
                 cwd=str(PROJECT_DIR),
             )
 
