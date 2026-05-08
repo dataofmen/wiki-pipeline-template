@@ -5,7 +5,7 @@ Wiki Pipeline Orchestrator — Python-based pipeline with Claude Code for note g
 Phases:
   3. Ingest: Python scripts (fetch_url, fetch_thread, extract_pdf)
   4. Note Maker: Claude Code with --continue (session reuse)
-  5. Publisher: Shell commands (sync, commit, build, deploy)
+  5. Publisher: Shell commands (sync, build, deploy)
   6. Report: Summary generation
 
 Usage:
@@ -35,6 +35,16 @@ GARDEN_DIR = PROJECT_DIR / "garden"
 QUARTZ_DIR = PROJECT_DIR / "quartz"
 SCRIPTS_DIR = PROJECT_DIR / "scripts"
 LOG_FILE = SCRIPTS_DIR / "pipeline.log"
+VENV_PYTHON = str(PROJECT_DIR / ".venv" / "bin" / "python3")
+
+# Try importing ultimate-fetcher bridge; fall back to subprocess scripts
+try:
+    sys.path.insert(0, str(SCRIPTS_DIR))
+    from fetcher_bridge import fetch_and_save as _fetch_and_save
+    USE_ULTIMATE_FETCHER = True
+except ImportError:
+    USE_ULTIMATE_FETCHER = False
+    _fetch_and_save = None
 
 logging.basicConfig(
     filename=LOG_FILE,
@@ -43,6 +53,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Also log to stderr for subprocess visibility
 handler = logging.StreamHandler(sys.stderr)
 handler.setLevel(logging.INFO)
 logger.addHandler(handler)
@@ -64,6 +75,8 @@ def run_cmd(cmd: list[str], cwd: Path | None = None, check: bool = True) -> subp
         logger.warning(result.stderr.strip())
     if check and result.returncode != 0:
         logger.error(f"Command failed: {' '.join(cmd)}")
+        logger.error(f"stdout: {result.stdout}")
+        logger.error(f"stderr: {result.stderr}")
         raise RuntimeError(f"Command failed with code {result.returncode}: {' '.join(cmd)}")
     return result
 
@@ -94,7 +107,9 @@ def scan_inbox() -> list[dict]:
         for f in dir_path.glob("*.md"):
             content = f.read_text(errors="ignore")
             if "status: pending" in content or "status: processing" in content:
+                # Check if already in pending list
                 if not any(p.get("inbox_path", "").endswith(f.name) for p in pending):
+                    # Parse frontmatter
                     url = ""
                     for line in content.split("\n"):
                         if line.startswith("source_url:"):
@@ -109,7 +124,7 @@ def scan_inbox() -> list[dict]:
                         "status": "processing",
                         "received_at": datetime.now().isoformat(),
                     })
-        # Also handle direct PDF file drops
+        # Also handle direct file drops (not .md, like .pdf files)
         if subdir == "pdfs":
             for f in dir_path.glob("*.pdf"):
                 if not any(p.get("inbox_path", "").endswith(f.name) for p in pending):
@@ -127,8 +142,12 @@ def scan_inbox() -> list[dict]:
 
 
 def phase_ingest(pending: list[dict]) -> list[dict]:
-    """Phase 3: Extract content from inbox files to clippings/."""
+    """Phase 3: Extract content from inbox files → clippings/."""
     logger.info(f"=== Phase 3: Ingest ({len(pending)} items) ===")
+    if USE_ULTIMATE_FETCHER:
+        logger.info("Using ultimate-fetcher bridge for URL/thread fetching")
+    else:
+        logger.info("ultimate-fetcher not available, falling back to subprocess scripts")
     results = []
     CLIPPINGS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -140,54 +159,72 @@ def phase_ingest(pending: list[dict]) -> list[dict]:
         logger.info(f"Processing: {source_url or inbox_path} (type: {source_type})")
 
         try:
-            if source_type == "thread" and source_url:
+            # PDF extraction stays as subprocess (ultimate-fetcher has no PDF plugin)
+            if source_type == "pdf" and inbox_path:
+                python_bin = VENV_PYTHON if os.path.exists(VENV_PYTHON) else "python3"
                 result = run_cmd(
-                    ["python3", str(SCRIPTS_DIR / "fetch_thread.py"), source_url, "--output", str(CLIPPINGS_DIR)],
+                    [python_bin, str(SCRIPTS_DIR / "extract_pdf.py"), inbox_path, "--output", str(CLIPPINGS_DIR)],
                     check=False,
                 )
-            elif source_type == "url" and source_url:
-                result = run_cmd(
-                    ["python3", str(SCRIPTS_DIR / "fetch_url.py"), source_url, "--output", str(CLIPPINGS_DIR)],
-                    check=False,
-                )
-            elif source_type == "pdf" and inbox_path:
-                result = run_cmd(
-                    ["python3", str(SCRIPTS_DIR / "extract_pdf.py"), inbox_path, "--output", str(CLIPPINGS_DIR)],
-                    check=False,
-                )
+                output = result.stdout.strip() if result else ""
+                clipping_path = ""
+                for line in output.split("\n"):
+                    if line.startswith("Saved:") or line.startswith("Clipping saved:"):
+                        clipping_path = line.split(":", 1)[1].strip()
+                if not clipping_path:
+                    recent = max(CLIPPINGS_DIR.glob("*.md"), key=lambda f: f.stat().st_mtime, default=None)
+                    if recent:
+                        clipping_path = str(recent)
+                results.append({
+                    "source_url": source_url or inbox_path,
+                    "clipping_path": clipping_path,
+                    "status": "success" if result and result.returncode == 0 else "error",
+                    "domain_hint": item.get("domain_hint", "general"),
+                })
+                logger.info(f"Clipping saved: {clipping_path}")
+
+            # URL/thread: use ultimate-fetcher bridge if available, else subprocess
+            elif source_url and source_type in ("url", "thread"):
+                if USE_ULTIMATE_FETCHER:
+                    fetch_result = _fetch_and_save(source_url, CLIPPINGS_DIR, source_type=source_type)
+                    results.append({
+                        "source_url": source_url,
+                        "clipping_path": fetch_result.get("clipping_path", ""),
+                        "status": fetch_result.get("status", "error"),
+                        "domain_hint": fetch_result.get("domain_hint", "general"),
+                        "fetch_method": fetch_result.get("fetch_method", "unknown"),
+                    })
+                    logger.info(f"Clipping saved ({fetch_result.get('fetch_method', '?')}): {fetch_result.get('clipping_path', '')}")
+                else:
+                    # Fallback: subprocess to old scripts
+                    if source_type == "thread":
+                        result = run_cmd(
+                            ["python3", str(SCRIPTS_DIR / "fetch_thread.py"), source_url, "--output", str(CLIPPINGS_DIR)],
+                            check=False,
+                        )
+                    else:
+                        result = run_cmd(
+                            ["python3", str(SCRIPTS_DIR / "fetch_url.py"), source_url, "--output", str(CLIPPINGS_DIR)],
+                            check=False,
+                        )
+                    output = result.stdout.strip() if result else ""
+                    clipping_path = ""
+                    for line in output.split("\n"):
+                        if line.startswith("Saved:") or line.startswith("Clipping saved:"):
+                            clipping_path = line.split(":", 1)[1].strip()
+                    if not clipping_path:
+                        recent = max(CLIPPINGS_DIR.glob("*.md"), key=lambda f: f.stat().st_mtime, default=None)
+                        if recent:
+                            clipping_path = str(recent)
+                    results.append({
+                        "source_url": source_url,
+                        "clipping_path": clipping_path,
+                        "status": "success" if result and result.returncode == 0 else "error",
+                        "domain_hint": item.get("domain_hint", "general"),
+                    })
+                    logger.info(f"Clipping saved: {clipping_path}")
             else:
                 logger.warning(f"Unknown type or missing info: {item}")
-                continue
-
-            # Extract clipping path from script output
-            output = result.stdout.strip() if result else ""
-            clipping_path = ""
-            for line in output.split("\n"):
-                if line.startswith("Saved:") or line.startswith("Clipping saved:"):
-                    clipping_path = line.split(":", 1)[1].strip()
-
-            # Fallback: find most recent clipping
-            if not clipping_path:
-                recent = max(CLIPPINGS_DIR.glob("*.md"), key=lambda f: f.stat().st_mtime, default=None)
-                if recent:
-                    clipping_path = str(recent)
-
-            results.append({
-                "source_url": source_url or inbox_path,
-                "clipping_path": clipping_path,
-                "status": "success" if result and result.returncode == 0 else "error",
-                "domain_hint": item.get("domain_hint", "general"),
-            })
-            logger.info(f"Clipping saved: {clipping_path}")
-
-        except Exception as e:
-            logger.error(f"Failed to process {source_url or inbox_path}: {e}")
-            results.append({
-                "source_url": source_url or inbox_path,
-                "clipping_path": "",
-                "status": "error",
-                "error": str(e),
-            })
 
     # Write ingestor_done.jsonl
     WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
@@ -195,7 +232,7 @@ def phase_ingest(pending: list[dict]) -> list[dict]:
     with open(done_file, "w") as f:
         for r in results:
             f.write(json.dumps(r, ensure_ascii=False) + "\n")
-    logger.info(f"Ingest complete: {sum(1 for r in results if r['status'] == 'success')} success, {sum(1 for r in results if r['status'] == 'error')} error")
+    logger.info(f"Ingest complete: {len([r for r in results if r['status'] == 'success'])} success, {len([r for r in results if r['status'] == 'error'])} error")
 
     return results
 
@@ -215,21 +252,19 @@ def phase_note_make(clippings: list[dict]) -> list[dict]:
         for c in successful_clippings
     )
 
-    prompt = f"""Process these clipping files through the 6 Rs pipeline. Read the note-pipeline skill and note-format.md reference first.
+    prompt = f"""다음 clipping 파일들을 6 Rs 파이프라인으로 처리하라. note-pipeline 스킬과 note-format.md 참조 파일을 반드시 읽고 따른다.
 
-Clipping files:
+처리할 clipping 파일들:
 {clipping_list}
 
-Steps:
-1. Read references/note-format.md
-2. For each clipping: R1(Reduce) -> R2(Reflect) -> R3(Reweave) -> R4(Record) -> R5(Verify)
-3. Create wiki/ note (1 per clipping) + garden/ notes (1-3 per clipping)
-4. Save to wiki/concepts/ or wiki/entities/ based on type
-5. Update related index.md files
-6. Append to log.md
-7. Write _workspace/note_maker_done.jsonl with created note paths
-
-After creating notes, also update clippings/index.md to include ALL clipping files with their metadata (title, source, date, domain)."""
+작업 순서:
+1. references/note-format.md 읽기
+2. 각 clipping에 대해 R1(Reduce) → R2(Reflect) → R3(Reweave) → R4(Record) → R5(Verify) 실행
+3. 각 clipping마다 wiki/ 노트 1개 + garden/ 노트 1~3개 생성
+4. wiki/concepts/ 또는 wiki/entities/ 에 저장 (type 기준)
+5. 관련 index.md 갱신
+6. log.md에 작업 기록
+7. 완료 목록을 _workspace/note_maker_done.jsonl에 작성"""
 
     # Use --continue for session context, --fork-session to avoid polluting interactive session
     cmd = [
@@ -246,7 +281,7 @@ After creating notes, also update clippings/index.md to include ALL clipping fil
             cwd=str(PROJECT_DIR),
             capture_output=True,
             text=True,
-            timeout=600,
+            timeout=600,  # 10 minute timeout
         )
         logger.info(f"Claude Code exited with code {result.returncode}")
         if result.stdout:
@@ -260,7 +295,7 @@ After creating notes, also update clippings/index.md to include ALL clipping fil
         logger.error("Claude Code CLI not found. Install with: npm install -g @anthropic-ai/claude-code")
         return [{"status": "error", "error": "claude CLI not found"}]
 
-    # Check results
+    # Check results by scanning for new files
     results = []
     note_maker_done = WORKSPACE_DIR / "note_maker_done.jsonl"
     if note_maker_done.exists():
@@ -276,7 +311,7 @@ After creating notes, also update clippings/index.md to include ALL clipping fil
             if pattern_dir.exists():
                 for f in pattern_dir.glob("*.md"):
                     mtime = datetime.fromtimestamp(f.stat().st_mtime)
-                    if (now - mtime).total_seconds() < 600:
+                    if (now - mtime).total_seconds() < 600:  # Created in last 10 min
                         results.append({
                             "path": str(f.relative_to(PROJECT_DIR)),
                             "status": "created",
@@ -287,30 +322,10 @@ After creating notes, also update clippings/index.md to include ALL clipping fil
 
 
 def phase_publish() -> bool:
-    """Phase 5: Commit content, sync, build, and deploy."""
+    """Phase 5: Quartz build + deploy."""
     logger.info("=== Phase 5: Publisher ===")
 
-    # Step 0: Commit content changes to content repo (CRITICAL)
-    logger.info("Committing content changes...")
-    try:
-        subprocess.run(["git", "add", "clippings/", "wiki/", "garden/", "index.md", "log.md"],
-                       cwd=str(PROJECT_DIR), capture_output=True, check=False)
-        result = subprocess.run(["git", "diff", "--cached", "--quiet"],
-                                cwd=str(PROJECT_DIR), capture_output=True, check=False)
-        if result.returncode != 0:  # There are staged changes
-            subprocess.run(
-                ["git", "commit", "-m", f"Pipeline: content update {datetime.now().strftime('%Y-%m-%d %H:%M')}"],
-                cwd=str(PROJECT_DIR), capture_output=True, check=False,
-            )
-            subprocess.run(["git", "push", "origin", "main"],
-                           cwd=str(PROJECT_DIR), capture_output=True, check=False)
-            logger.info("Content repo committed and pushed")
-        else:
-            logger.info("No content changes to commit")
-    except Exception as e:
-        logger.warning(f"Content repo commit failed (non-fatal): {e}")
-
-    # Step 1: Sync content to Quartz
+    # Step 1: Sync content
     logger.info("Syncing content...")
     sync_result = run_cmd(["bash", str(SCRIPTS_DIR / "sync_content.sh")], check=False)
     if sync_result.returncode != 0:
@@ -355,12 +370,13 @@ def phase_report(ingest_results: list, note_results: list, publish_success: bool
     notes_created = len(note_results)
 
     report = f"""
-Pipeline result — {datetime.now().strftime('%Y-%m-%d %H:%M')}
+파이프라인 실행 결과 — {datetime.now().strftime('%Y-%m-%d %H:%M')}
 {'=' * 50}
-- Received: {len(ingest_results)} items
-- Clipped: {successful_clips} success / {failed_clips} error
-- Notes: {notes_created} created
-- Published: {'success' if publish_success else 'failed'}
+- 수신: {len(ingest_results)}개 항목
+- 클리핑: {successful_clips}개 완료 / {failed_clips}개 실패
+- 노트 생성: {notes_created}개
+- 퍼블리시: {'성공' if publish_success else '실패'}
+- 사이트: https://dataofmen.github.io/
 {'=' * 50}
 """
     print(report)
@@ -374,6 +390,7 @@ Pipeline result — {datetime.now().strftime('%Y-%m-%d %H:%M')}
     WORKSPACE_DIR.rename(workspace_prev)
     WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
 
+    # Write summary to new workspace
     with open(WORKSPACE_DIR / "last_run_summary.md", "w") as f:
         f.write(report)
 
@@ -412,12 +429,14 @@ def main():
                 ingest_results = phase_ingest(pending)
             else:
                 logger.info("No pending items in inbox")
+                ingest_results = []
 
     # Phase 4: Note Maker
     if 4 in phases:
         if args.dry_run:
-            print("[DRY RUN] Would invoke Claude Code for note generation")
+            print(f"[DRY RUN] Would invoke Claude Code for note generation")
         else:
+            # Use ingestor_done.jsonl if available, otherwise scan clippings
             done_file = WORKSPACE_DIR / "ingestor_done.jsonl"
             if done_file.exists():
                 with open(done_file) as f:
@@ -427,11 +446,13 @@ def main():
 
             if clippings:
                 note_results = phase_note_make(clippings)
+            else:
+                logger.warning("No clippings to process for note generation")
 
     # Phase 5: Publisher
     if 5 in phases:
         if args.dry_run:
-            print("[DRY RUN] Would commit content, sync, build and deploy")
+            print("[DRY RUN] Would run Quartz build + deploy")
         else:
             publish_success = phase_publish()
 

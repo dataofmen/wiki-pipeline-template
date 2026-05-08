@@ -1,9 +1,9 @@
 """
-Inbox folder watcher — auto-triggers Python pipeline on new files.
-Usage: python3 inbox_watcher.py
+Inbox 폴더 감시 → 파이프라인 자동 트리거
+사용법: python3 inbox_watcher.py
 
-Triggers pipeline.py (Phases 3-6) directly.
-Only Phase 4 (Note Maker) invokes Claude Code internally.
+Python 파이프라인(Phases 3-6)을 직접 실행하고,
+Note Maker(Phase 4)만 Claude Code에 위임합니다.
 """
 import time
 import subprocess
@@ -15,6 +15,7 @@ from watchdog.events import FileSystemEventHandler
 INBOX_DIR = Path(__file__).parent.parent / "inbox"
 PROJECT_DIR = Path(__file__).parent.parent
 SCRIPTS_DIR = Path(__file__).parent.parent / "scripts"
+VENV_PYTHON = str(Path(__file__).parent.parent / ".venv" / "bin" / "python3")
 
 logging.basicConfig(
     filename=Path(__file__).parent / "watcher.log",
@@ -22,7 +23,7 @@ logging.basicConfig(
     format="%(asctime)s %(message)s",
 )
 
-DEBOUNCE_SECONDS = 30  # wait 30s after file addition before triggering pipeline
+DEBOUNCE_SECONDS = 30  # 파일 추가 후 30초 대기 후 파이프라인 실행
 
 
 class InboxHandler(FileSystemEventHandler):
@@ -35,16 +36,17 @@ class InboxHandler(FileSystemEventHandler):
             return
         path = Path(event.src_path)
         if path.suffix in [".md", ".txt", ".yaml", ".pdf"] and "inbox" in str(path):
-            logging.info(f"New file detected: {path}")
+            logging.info(f"새 파일 감지: {path}")
             self._pending = True
             self._last_event = time.time()
 
     def trigger_if_ready(self):
         if self._pending and (time.time() - self._last_event) >= DEBOUNCE_SECONDS:
             self._pending = False
-            logging.info("Triggering Python pipeline")
+            python_bin = VENV_PYTHON if Path(VENV_PYTHON).exists() else "python3"
+            logging.info(f"Python 파이프라인 트리거 ({python_bin})")
             subprocess.Popen(
-                ["python3", str(SCRIPTS_DIR / "pipeline.py")],
+                [python_bin, str(SCRIPTS_DIR / "pipeline.py")],
                 cwd=str(PROJECT_DIR),
             )
 
@@ -52,18 +54,18 @@ class InboxHandler(FileSystemEventHandler):
 def main():
     handler = InboxHandler()
 
-    # check for existing pending files at startup
+    # 시작 시 기존 pending 파일 확인
     existing = list(INBOX_DIR.rglob("*.md")) + list(INBOX_DIR.rglob("*.pdf"))
     pending = [f for f in existing if "status: pending" in f.read_text(errors="ignore")]
     if pending:
-        logging.info(f"Found {len(pending)} pending files — scheduling pipeline trigger")
+        logging.info(f"기존 pending 파일 {len(pending)}개 감지 — 파이프라인 트리거 예약")
         handler._pending = True
-        handler._last_event = time.time() - DEBOUNCE_SECONDS  # trigger immediately
+        handler._last_event = time.time() - DEBOUNCE_SECONDS  # 즉시 트리거
 
     observer = Observer()
     observer.schedule(handler, str(INBOX_DIR), recursive=True)
     observer.start()
-    logging.info(f"Inbox watcher started: {INBOX_DIR}")
+    logging.info(f"Inbox 감시 시작: {INBOX_DIR}")
     try:
         while True:
             time.sleep(5)
