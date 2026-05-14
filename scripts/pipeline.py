@@ -85,10 +85,10 @@ def scan_inbox() -> list[dict]:
     """Scan inbox for pending files (Phase 2 output or manual drops)."""
     pending = []
 
-    # Check _workspace/hermes_new_files.jsonl first
-    hermes_file = WORKSPACE_DIR / "hermes_new_files.jsonl"
-    if hermes_file.exists():
-        with open(hermes_file) as f:
+    # Check _workspace/kiwi_new_files.jsonl first
+    kiwi_file = WORKSPACE_DIR / "kiwi_new_files.jsonl"
+    if kiwi_file.exists():
+        with open(kiwi_file) as f:
             for line in f:
                 entry = json.loads(line.strip())
                 if entry.get("status") in ("pending", "processing"):
@@ -97,7 +97,7 @@ def scan_inbox() -> list[dict]:
                         entry["inbox_path_resolved"] = str(inbox_path)
                         entry["status"] = "processing"
                         pending.append(entry)
-        logger.info(f"Found {len(pending)} pending items from hermes")
+        logger.info(f"Found {len(pending)} pending items from kiwi")
 
     # Also scan inbox/ for any unprocessed files
     for subdir in ["urls", "threads", "pdfs"]:
