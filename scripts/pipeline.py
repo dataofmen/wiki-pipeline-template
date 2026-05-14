@@ -335,7 +335,23 @@ def phase_publish() -> bool:
     logger.info("Checking links...")
     run_cmd(["python3", str(SCRIPTS_DIR / "check_links.py")], check=False)
 
-    # Step 3: Build and deploy
+    # Step 3: Push content repo to GitHub (Actions build pulls from this)
+    logger.info("Pushing content to GitHub...")
+    run_cmd(["git", "add", "wiki/", "garden/", "clippings/", "scripts/", "index.md"],
+            cwd=PROJECT_DIR, check=False)
+    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+    commit_result = run_cmd(
+        ["git", "commit", "-m", f"content: pipeline auto-publish {ts}"],
+        cwd=PROJECT_DIR, check=False,
+    )
+    if commit_result.returncode == 0:
+        push_result = run_cmd(["git", "push", "origin", "main"], cwd=PROJECT_DIR, check=False)
+        if push_result.returncode != 0:
+            logger.warning(f"git push failed (non-fatal): {push_result.stderr[:200]}")
+    else:
+        logger.info("Nothing new to commit for content repo")
+
+    # Step 4: Build and deploy
     logger.info("Building and deploying Quartz site...")
     deploy_result = run_cmd(
         ["npx", "quartz", "sync"],
