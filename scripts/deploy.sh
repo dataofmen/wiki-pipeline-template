@@ -11,7 +11,7 @@ fi
 
 echo "[1/4] Committing content changes..."
 cd "$WIKI_ROOT"
-git add clippings/ wiki/ garden/ index.md log.md
+git add clippings/ wiki/ garden/ scripts/ index.md log.md
 if ! git diff --cached --quiet; then
   git commit -m "Pipeline: content update $(date '+%Y-%m-%d %H:%M')"
   git push origin main
