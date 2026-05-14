@@ -20,7 +20,7 @@ import re
 import sys
 from datetime import datetime
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urlparse, unquote
 
 
 def detect_domain_hint(url: str, title: str, content: str) -> str:
@@ -52,6 +52,65 @@ def is_youtube_url(url: str) -> bool:
 
 def is_reddit_url(url: str) -> bool:
     return "reddit.com" in urlparse(url).netloc.lower()
+
+
+def is_linkedin_url(url: str) -> bool:
+    return "linkedin.com" in urlparse(url).netloc.lower()
+
+
+def _clean_linkedin_content(content: str) -> str:
+    """Strip LinkedIn navigation noise and ensure paragraph breaks."""
+    from urllib.parse import parse_qs, urlparse as _up
+
+    def _unwrap_redir(href: str) -> str:
+        if "linkedin.com/redir/redirect" in href:
+            try:
+                qs = parse_qs(_up(href).query)
+                return unquote(qs.get("url", [href])[0])
+            except Exception:
+                pass
+        return href
+
+    content = re.sub(
+        r'https://(?:www\.)?linkedin\.com/redir/redirect\?url=[^\s\"']+',
+        lambda m: _unwrap_redir(m.group(0)), content
+    )
+    content = re.sub(r'\(([^\s\)]+)\s+"[^"]*"\)', r'(\1)', content)
+
+    stop_keywords = (
+        "trk=public_post_like-cta",
+        "trk=public_post_comment-cta",
+        "trk=public_post_social-actions",
+        "trk=public_post_reshare-cta",
+    )
+
+    lines_out = []
+    for line in content.splitlines():
+        stripped = line.strip()
+        if any(kw in stripped for kw in stop_keywords):
+            break
+        if any(pat in stripped for pat in (
+            "Report this post", "trk=public_post_feed-actor",
+            "/uas/login?session_redirect",
+        )):
+            continue
+        if re.match(r'^\d+[hdw]$', stripped):
+            continue
+        line = re.sub(
+            r'\[([^\]]+)\]\(https://[^\s\)]*linkedin\.com/signup[^\)]*\)',
+            lambda m: m.group(1) if m.group(1).startswith("#") else m.group(0),
+            line
+        )
+        lines_out.append(line)
+
+    joined = re.sub(r'\n{3,}', '\n\n', "\n".join(lines_out))
+    result_lines = joined.split('\n')
+    final_lines = []
+    for i, line in enumerate(result_lines):
+        final_lines.append(line)
+        if line.strip() and i + 1 < len(result_lines) and result_lines[i + 1].strip():
+            final_lines.append('')
+    return '\n'.join(final_lines).strip()
 
 
 def determine_source_type(url: str, declared_type: str = "") -> str:
@@ -132,6 +191,9 @@ async def _fetch_via_ultimate_fetcher(url: str) -> dict:
 def format_clipping(url: str, title: str, content: str, method: str,
                     source_type: str, domain_hint: str, output_dir: Path) -> Path:
     """Write a clipping .md file with YAML front matter."""
+    url = unquote(url)
+    if is_linkedin_url(url):
+        content = _clean_linkedin_content(content)
     date = datetime.now().strftime("%Y%m%d")
     slug = slug_from_title(title) or urlparse(url).netloc.replace(".", "-")
     filename = f"{date}-{slug}.md"
