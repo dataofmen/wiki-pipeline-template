@@ -443,6 +443,31 @@ def _clean_x_content(content: str) -> str:
     return '\n'.join(final_lines).strip()
 
 
+def fetch_via_readability_js(url: str) -> dict:
+    """@mozilla/readability + turndown via Bun — ultimate-fetcher 실패 시 폴백."""
+    script = Path(__file__).parent / "readability_fetch.mjs"
+    if not script.exists():
+        return {}
+    bun = shutil.which("bun") or "/Users/hmkwon/.bun/bin/bun"
+    try:
+        proc = subprocess.run(
+            [bun, str(script), url],
+            capture_output=True, text=True, timeout=30,
+        )
+        if proc.stdout.strip():
+            result = json.loads(proc.stdout.strip())
+            if result.get("content") and not result.get("error"):
+                return {
+                    "title": result.get("title", "") or urlparse(url).netloc,
+                    "content": result["content"],
+                    "method": "readability-js",
+                    "domain_hint": detect_domain_hint(url, result.get("title", ""), result["content"]),
+                }
+    except Exception as e:
+        print(f"readability-js 폴백 실패: {e}", file=sys.stderr)
+    return {}
+
+
 def determine_source_type(url: str, declared_type: str = "") -> str:
     if declared_type == "thread" or is_twitter_url(url):
         return "thread"
@@ -502,15 +527,27 @@ async def _fetch_via_ultimate_fetcher(url: str) -> dict:
 
     # Strip common title prefixes from fetcher output
     title = re.sub(r"^Title:\s*", "", title).strip()
-    # X.com titles: "Nainsi Dwivedi on X: \"...\" / X" → extract quoted part
-    x_title_match = re.match(r'(.+?)\s+on\s+[Xx]:\s*"(.+?)"', title)
+    # Strip trailing " / X" noise from X.com page titles
+    title = re.sub(r'\s*/\s*[Xx]\s*$', '', title).strip()
+    # X.com titles: "Author on X: "tweet content"" → extract tweet content
+    x_title_match = re.match(r'.+?\s+on\s+[Xx]:\s*"(.+?)"?\s*$', title)
     if x_title_match:
-        title = x_title_match.group(2)
-    # PDF titles like "A.pdf" → use URL path instead
-    if re.match(r'^[A-Za-z0-9_ -]+\.pdf$', title, re.IGNORECASE) and len(title) < 30:
-        url_path = urlparse(url).path.strip("/")
-        if url_path:
-            title = url_path.replace("-", " ").replace(".pdf", "").strip()
+        title = x_title_match.group(1).strip().strip('"').strip()
+    elif re.search(r'\s+on\s+[Xx]:\s+', title):
+        # No quotes: take everything after "on X: "
+        title = re.sub(r'^.+?\s+on\s+[Xx]:\s+', '', title).strip()
+    # PDF: prefer content-derived title over generic filename
+    if re.match(r'^[A-Za-z0-9_ -]+\.pdf$', title, re.IGNORECASE):
+        # Try to extract title from content (first H1 or H2)
+        for line in content.splitlines():
+            stripped = line.lstrip("# ").strip()
+            if stripped and len(stripped) > 10 and not stripped.startswith("http"):
+                title = stripped
+                break
+        else:
+            url_path = urlparse(url).path.strip("/").replace("-", " ").replace(".pdf", "").strip()
+            if url_path:
+                title = url_path
 
     # Improve generic titles from Jina results
     if method == "jina" and (not title or title.startswith("Fetched via")):
@@ -544,6 +581,35 @@ def sanitize_slug(slug: str) -> str:
     return ascii_only.strip("-").lower()
 
 
+def _clean_jina_content(content: str, title: str) -> str:
+    """Strip Jina AI metadata headers and duplicate H1 from fetched body content."""
+    lines = content.splitlines()
+    cleaned = []
+    skip_next_blank = False
+    for line in lines:
+        # Strip Jina metadata lines
+        if re.match(r"^(URL Source|Published Time|Markdown Content|Number of Pages)\s*:", line):
+            skip_next_blank = True
+            continue
+        if skip_next_blank and line.strip() == "":
+            skip_next_blank = False
+            continue
+        skip_next_blank = False
+        cleaned.append(line)
+
+    # Remove leading H1 that duplicates the frontmatter title
+    result = "\n".join(cleaned)
+    title_core = re.sub(r"[^\w\s]", "", title).strip().lower()
+    first_h1 = re.match(r"^#\s+(.+)", result.lstrip(), re.MULTILINE)
+    if first_h1:
+        h1_core = re.sub(r"[^\w\s]", "", first_h1.group(1)).strip().lower()
+        if h1_core == title_core or title_core.startswith(h1_core) or h1_core.startswith(title_core):
+            result = result.lstrip()
+            result = re.sub(r"^#\s+.+\n*", "", result, count=1)
+
+    return result.strip()
+
+
 def format_clipping(url: str, title: str, content: str, method: str,
                     source_type: str, domain_hint: str, output_dir: Path) -> Path:
     """Write a clipping .md file with YAML front matter."""
@@ -554,6 +620,9 @@ def format_clipping(url: str, title: str, content: str, method: str,
         content = _clean_linkedin_content(content)
     if is_twitter_url(url):
         content = _clean_x_content(content)
+    # Strip Jina metadata headers from all non-thread content
+    if source_type != "thread" and not is_twitter_url(url):
+        content = _clean_jina_content(content, title)
     date = datetime.now().strftime("%Y%m%d")
     slug = sanitize_slug(slug_from_title_and_url(title, url) or urlparse(url).netloc.replace(".", "-"))
     filename = f"{date}-{slug}.md"
@@ -775,7 +844,23 @@ def fetch_and_save(url: str, output_dir: Path, source_type: str = "",
                 "fetch_method": "failed",
             }
 
-    # Direct import unavailable — use subprocess with ultimate-fetcher's venv Python
+    # ultimate-fetcher 직접 임포트 불가 → Readability.js 폴백 시도
+    rjs = fetch_via_readability_js(url)
+    if rjs.get("content"):
+        path = format_clipping(
+            url, rjs["title"], rjs["content"],
+            rjs["method"], source_type or "url",
+            rjs["domain_hint"], output_dir,
+        )
+        return {
+            "source_url": url,
+            "clipping_path": str(path),
+            "status": "success",
+            "domain_hint": rjs["domain_hint"],
+            "fetch_method": rjs["method"],
+        }
+
+    # 최후 수단 — subprocess로 ultimate-fetcher venv Python 호출
     uf_python = python_bin or UF_VENV_PYTHON
     if not Path(uf_python).exists():
         uf_python = "python3"
