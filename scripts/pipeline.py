@@ -457,6 +457,7 @@ def phase_note_make(clippings: list[dict]) -> list[dict]:
         "-p", prompt,
         "--continue",
         "--fork-session",
+        "--allowedTools", "Edit,Write,Bash,Read,Agent",
     ]
 
     logger.info("Invoking Claude Code for note generation...")
