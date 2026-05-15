@@ -6,15 +6,29 @@ import sys
 import re
 import argparse
 import subprocess
+import unicodedata
+import yaml
 from pathlib import Path
 from datetime import datetime
 from urllib.parse import urlparse
+import unicodedata
 
 
 def slug_from_title(title: str) -> str:
     title = re.sub(r"[^\w\s-]", "", title.lower())
     words = title.split()[:5]
-    return "-".join(words)
+    slug = "-".join(words)
+    return sanitize_slug(slug)
+
+
+def sanitize_slug(slug: str) -> str:
+    """Transliterate Korean/Unicode characters to ASCII-safe slug."""
+    normalized = unicodedata.normalize("NFKD", slug)
+    ascii_only = "".join(c for c in normalized if not unicodedata.combining(c))
+    ascii_only = re.sub(r"[^\w\s-]", "", ascii_only)
+    ascii_only = re.sub(r"[\s_]+", "-", ascii_only)
+    ascii_only = re.sub(r"-{2,}", "-", ascii_only)
+    return ascii_only.strip("-").lower()
 
 
 def fetch_via_jina(url: str):
@@ -24,26 +38,30 @@ def fetch_via_jina(url: str):
                             headers={"Accept": "text/markdown"})
         if resp.status_code == 200 and len(resp.text) > 200:
             return resp.text
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"jina fetch failed: {e}", file=sys.stderr)
     return None
 
 
 def fetch_via_readability(url: str):
+    """@mozilla/readability + turndown via Bun — Firefox Reader View 수준 본문 추출."""
+    import json
+    import shutil
+    bun = shutil.which("bun") or "/Users/hmkwon/.bun/bin/bun"
+    script = Path(__file__).parent / "readability_fetch.mjs"
     try:
-        import requests
-        from readability import Document
-        resp = requests.get(url, timeout=30, headers={"User-Agent": "Mozilla/5.0"})
-        resp.raise_for_status()
-        doc = Document(resp.text)
-        title = doc.title()
-        content = doc.summary()
-        # HTML → plain text 기본 변환
-        content = re.sub(r"<[^>]+>", "", content)
-        content = re.sub(r"\n{3,}", "\n\n", content)
-        return title, content.strip()
+        proc = subprocess.run(
+            [bun, str(script), url],
+            capture_output=True, text=True, timeout=30,
+        )
+        if proc.stdout.strip():
+            result = json.loads(proc.stdout.strip())
+            if result.get("content") and not result.get("error"):
+                return result["title"], result["content"]
+            if result.get("error"):
+                print(f"readability-js: {result['error']}", file=sys.stderr)
     except Exception as e:
-        print(f"readability 실패: {e}", file=sys.stderr)
+        print(f"readability-js 실패: {e}", file=sys.stderr)
     return None
 
 
@@ -76,29 +94,24 @@ def detect_domain_hint(url: str, title: str, content: str) -> str:
 
 def save_clipping(url: str, title: str, content: str, method: str, output_dir: Path) -> Path:
     date = datetime.now().strftime("%Y%m%d")
-    slug = slug_from_title(title) or urlparse(url).netloc.replace(".", "-")
+    slug = sanitize_slug(slug_from_title(title) or urlparse(url).netloc.replace(".", "-"))
     filename = f"{date}-{slug}.md"
     domain_hint = detect_domain_hint(url, title, content)
     word_count = len(content.split())
 
-    front_matter = f"""---
-source_url: {url}
-source_type: url
-clipped_at: {datetime.now().isoformat()}
-title: {title}
-author: ""
-word_count: {word_count}
-fetch_method: {method}
-status: clipped
-domain_hint: {domain_hint}
-tags: []
----
-
-{content}
-
----
-*원문: [{url}]({url})*
-"""
+    front_matter_data = {
+        "source_url": url,
+        "source_type": "url",
+        "clipped_at": datetime.now().isoformat(),
+        "title": title,
+        "author": "",
+        "word_count": word_count,
+        "fetch_method": method,
+        "status": "clipped",
+        "domain_hint": domain_hint,
+        "tags": [],
+    }
+    front_matter = f"---\n{yaml.dump(front_matter_data, allow_unicode=True, default_flow_style=False).strip()}\n---\n\n{content}\n\n---\n*원문: [{url}]({url})*\n"
     path = output_dir / filename
     path.write_text(front_matter)
     return path
