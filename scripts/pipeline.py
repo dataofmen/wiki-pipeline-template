@@ -21,6 +21,7 @@ import argparse
 import json
 import logging
 import os
+import shutil
 import subprocess
 import sys
 from datetime import datetime
@@ -28,6 +29,7 @@ from pathlib import Path
 
 PROJECT_DIR = Path(__file__).parent.parent
 INBOX_DIR = PROJECT_DIR / "inbox"
+SITE_BASE_URL = "https://dataofmen.github.io"
 CLIPPINGS_DIR = PROJECT_DIR / "clippings"
 WORKSPACE_DIR = PROJECT_DIR / "_workspace"
 WIKI_DIR = PROJECT_DIR / "wiki"
@@ -35,9 +37,12 @@ GARDEN_DIR = PROJECT_DIR / "garden"
 QUARTZ_DIR = PROJECT_DIR / "quartz"
 SCRIPTS_DIR = PROJECT_DIR / "scripts"
 LOG_FILE = SCRIPTS_DIR / "pipeline.log"
+LOCK_FILE = SCRIPTS_DIR / ".pipeline.lock"
 VENV_PYTHON = str(PROJECT_DIR / ".venv" / "bin" / "python3")
+UF_VENV_PYTHON = str(Path("/Users/hmkwon/Projects/ultimate-fetcher/.venv/bin/python3"))
 
-# Try importing ultimate-fetcher bridge; fall back to subprocess scripts
+# Try importing ultimate-fetcher bridge; falls back to subprocess via UF venv Python
+# fetch_and_save() handles both cases: direct import if available, subprocess otherwise
 try:
     sys.path.insert(0, str(SCRIPTS_DIR))
     from fetcher_bridge import fetch_and_save as _fetch_and_save
@@ -59,6 +64,94 @@ handler.setLevel(logging.INFO)
 logger.addHandler(handler)
 
 
+def _note_path_to_url(path: str) -> str:
+    """Convert a note file path to its published site URL."""
+    p = Path(path)
+    # Strip .md extension and build URL from relative path
+    relative = p.with_suffix("")
+    return f"{SITE_BASE_URL}/{relative}"
+
+
+def _load_dotenv_value(key: str) -> str:
+    """Read a single value from scripts/.env without requiring python-dotenv at module level."""
+    env_file = SCRIPTS_DIR / ".env"
+    if not env_file.exists():
+        return ""
+    for line in env_file.read_text(errors="ignore").splitlines():
+        line = line.strip()
+        if line.startswith(key + "=") and not line.startswith("#"):
+            return line.split("=", 1)[1].strip().strip('"').strip("'")
+    return ""
+
+
+def notify_telegram(ingest_results: list, note_results: list, publish_success: bool) -> bool:
+    """Send pipeline completion summary to Telegram."""
+    try:
+        import requests as _requests
+    except ImportError:
+        logger.warning("requests not available — skipping Telegram notification")
+        return False
+
+    token = os.environ.get("TELEGRAM_BOT_TOKEN") or _load_dotenv_value("TELEGRAM_BOT_TOKEN")
+    allowed_users = os.environ.get("TELEGRAM_ALLOWED_USERS") or _load_dotenv_value("TELEGRAM_ALLOWED_USERS")
+
+    if not token or not allowed_users:
+        logger.warning("TELEGRAM_BOT_TOKEN or TELEGRAM_ALLOWED_USERS not set — skipping notification")
+        return False
+
+    chat_ids = [uid.strip() for uid in allowed_users.split(",") if uid.strip()]
+
+    successful_clips = len([r for r in ingest_results if r.get("status") == "success"])
+    failed_clips = len([r for r in ingest_results if r.get("status") == "error"])
+    publish_icon = "✅" if publish_success else "❌"
+
+    lines = [
+        f"{publish_icon} *파이프라인 완료* — {datetime.now().strftime('%m/%d %H:%M')}",
+        "",
+        f"📥 수신: {len(ingest_results)}개",
+        f"📄 클리핑: {successful_clips}개 성공 / {failed_clips}개 실패",
+        f"📝 노트: {len(note_results)}개 생성",
+        f"🌐 퍼블리시: {'성공' if publish_success else '실패'}",
+    ]
+
+    if note_results:
+        lines.append("")
+        lines.append("*생성된 노트:*")
+        for r in note_results[:10]:  # cap at 10 to avoid flood
+            path = r.get("path", "")
+            if not path:
+                continue
+            title = r.get("title") or Path(path).stem.replace("-", " ")
+            url = _note_path_to_url(path)
+            lines.append(f"• [{title}]({url})")
+        if len(note_results) > 10:
+            lines.append(f"  _외 {len(note_results) - 10}개…_")
+
+    lines += ["", f"🔗 [{SITE_BASE_URL}]({SITE_BASE_URL})"]
+
+    text = "\n".join(lines)
+    api_url = f"https://api.telegram.org/bot{token}/sendMessage"
+
+    all_ok = True
+    for chat_id in chat_ids:
+        try:
+            resp = _requests.post(
+                api_url,
+                json={"chat_id": chat_id, "text": text, "parse_mode": "Markdown"},
+                timeout=10,
+            )
+            if resp.status_code == 200:
+                logger.info(f"Telegram notification sent to {chat_id}")
+            else:
+                logger.warning(f"Telegram API error {resp.status_code}: {resp.text[:200]}")
+                all_ok = False
+        except Exception as e:
+            logger.error(f"Telegram send failed for {chat_id}: {e}")
+            all_ok = False
+
+    return all_ok
+
+
 def run_cmd(cmd: list[str], cwd: Path | None = None, check: bool = True) -> subprocess.CompletedProcess:
     """Run a command and log output."""
     logger.info(f"Running: {' '.join(cmd)}")
@@ -66,7 +159,8 @@ def run_cmd(cmd: list[str], cwd: Path | None = None, check: bool = True) -> subp
         cmd,
         cwd=cwd or PROJECT_DIR,
         capture_output=True,
-        text=True,
+        encoding="utf-8",
+        errors="replace",
         check=False,
     )
     if result.stdout:
@@ -81,9 +175,35 @@ def run_cmd(cmd: list[str], cwd: Path | None = None, check: bool = True) -> subp
     return result
 
 
+def _get_already_clipped_urls() -> set[str]:
+    """Return set of URLs already present in clippings/."""
+    clipped = set()
+    for cf in CLIPPINGS_DIR.glob("*.md"):
+        try:
+            for line in cf.read_text(errors="ignore").split("\n"):
+                if line.startswith("source_url:"):
+                    clipped.add(line.split("source_url:", 1)[1].strip())
+                    break
+        except Exception:
+            pass
+    return clipped
+
+
+def _mark_inbox_processed(inbox_path: str) -> None:
+    """Update inbox file status from pending/processing → processed."""
+    path = Path(inbox_path)
+    if not path.exists():
+        return
+    content = path.read_text(errors="ignore")
+    content = content.replace("status: pending", "status: processed")
+    content = content.replace("status: processing", "status: processed")
+    path.write_text(content)
+
+
 def scan_inbox() -> list[dict]:
     """Scan inbox for pending files (Phase 2 output or manual drops)."""
     pending = []
+    already_clipped = _get_already_clipped_urls()
 
     # Check _workspace/kiwi_new_files.jsonl first
     kiwi_file = WORKSPACE_DIR / "kiwi_new_files.jsonl"
@@ -94,6 +214,11 @@ def scan_inbox() -> list[dict]:
                 if entry.get("status") in ("pending", "processing"):
                     inbox_path = PROJECT_DIR / entry["inbox_path"]
                     if inbox_path.exists():
+                        source_url = entry.get("source_url", "")
+                        if source_url and source_url in already_clipped:
+                            logger.info(f"Skipping already-clipped URL: {source_url}")
+                            _mark_inbox_processed(str(inbox_path))
+                            continue
                         entry["inbox_path_resolved"] = str(inbox_path)
                         entry["status"] = "processing"
                         pending.append(entry)
@@ -115,6 +240,10 @@ def scan_inbox() -> list[dict]:
                         if line.startswith("source_url:"):
                             url = line.split("source_url:", 1)[1].strip()
                             break
+                    if url and url in already_clipped:
+                        logger.info(f"Skipping already-clipped URL: {url}")
+                        _mark_inbox_processed(str(f))
+                        continue
                     entry_type = "thread" if subdir == "threads" else ("pdf" if subdir == "pdfs" else "url")
                     pending.append({
                         "source_url": url,
@@ -225,6 +354,18 @@ def phase_ingest(pending: list[dict]) -> list[dict]:
                     logger.info(f"Clipping saved: {clipping_path}")
             else:
                 logger.warning(f"Unknown type or missing info: {item}")
+        except Exception as e:
+            logger.error(f"Error processing {source_url or inbox_path}: {e}")
+            results.append({
+                "source_url": source_url or inbox_path,
+                "clipping_path": "",
+                "status": "error",
+                "domain_hint": item.get("domain_hint", "general"),
+            })
+
+        # Mark inbox file processed only on success
+        if results and results[-1].get("status") == "success" and inbox_path:
+            _mark_inbox_processed(inbox_path)
 
     # Write ingestor_done.jsonl
     WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
@@ -237,11 +378,44 @@ def phase_ingest(pending: list[dict]) -> list[dict]:
     return results
 
 
+def _is_empty_clipping(path: str) -> bool:
+    """Check if a clipping file is empty/failed (no real content)."""
+    try:
+        content = Path(path).read_text(errors="ignore")
+        # Failed extraction markers
+        failure_markers = [
+            "[스레드 추출 실패",
+            "[스레드 추출 실패 — 수동 처리 필요]",
+            "[fetch failed]",
+            "[원문 추출 실패]",
+        ]
+        if any(marker in content for marker in failure_markers):
+            return True
+        # Check if body is essentially empty (front matter only)
+        parts = content.split("---", 2)
+        if len(parts) >= 3:
+            body = parts[2].strip()
+            # Remove source URL references
+            lines = [l for l in body.split("\n") if not l.startswith("원본:") and not l.startswith("*원문")]
+            body_text = "\n".join(lines).strip()
+            if len(body_text) < 50:  # Less than 50 chars of actual content
+                return True
+        return False
+    except Exception:
+        return True
+
+
 def phase_note_make(clippings: list[dict]) -> list[dict]:
     """Phase 4: Generate notes using Claude Code with session reuse."""
     logger.info(f"=== Phase 4: Note Maker ({len(clippings)} clippings) ===")
 
     successful_clippings = [c for c in clippings if c.get("status") == "success" and c.get("clipping_path")]
+    # Filter out empty/failed clippings
+    valid_clippings = [c for c in successful_clippings if not _is_empty_clipping(c["clipping_path"])]
+    skipped = len(successful_clippings) - len(valid_clippings)
+    if skipped:
+        logger.warning(f"Skipping {skipped} empty/failed clippings")
+    successful_clippings = valid_clippings
     if not successful_clippings:
         logger.warning("No successful clippings to process")
         return []
@@ -266,9 +440,20 @@ def phase_note_make(clippings: list[dict]) -> list[dict]:
 6. log.md에 작업 기록
 7. 완료 목록을 _workspace/note_maker_done.jsonl에 작성"""
 
-    # Use --continue for session context, --fork-session to avoid polluting interactive session
+    # Resolve claude binary — launchd daemon PATH may omit user PATH entries
+    _claude_candidates = [
+        shutil.which("claude"),
+        "/Users/hmkwon/.local/bin/claude",
+        "/Applications/cmux.app/Contents/Resources/bin/claude",
+        "/opt/homebrew/bin/claude",
+        "/usr/local/bin/claude",
+    ]
+    claude_bin = next((c for c in _claude_candidates if c and Path(c).exists()), None)
+    if not claude_bin:
+        logger.error("Claude CLI not found in any known location")
+        return [{"status": "error", "error": "claude CLI not found"}]
     cmd = [
-        "claude",
+        claude_bin,
         "-p", prompt,
         "--continue",
         "--fork-session",
@@ -335,7 +520,7 @@ def phase_publish() -> bool:
     logger.info("Checking links...")
     run_cmd(["python3", str(SCRIPTS_DIR / "check_links.py")], check=False)
 
-    # Step 3: Push content repo to GitHub (Actions build pulls from this)
+    # Step 3: Push 0004_Wikis content to GitHub (build pulls from this repo)
     logger.info("Pushing content to GitHub...")
     run_cmd(["git", "add", "wiki/", "garden/", "clippings/", "scripts/", "index.md"],
             cwd=PROJECT_DIR, check=False)
@@ -349,7 +534,7 @@ def phase_publish() -> bool:
         if push_result.returncode != 0:
             logger.warning(f"git push failed (non-fatal): {push_result.stderr[:200]}")
     else:
-        logger.info("Nothing new to commit for content repo")
+        logger.info("Nothing new to commit for 0004_Wikis")
 
     # Step 4: Build and deploy
     logger.info("Building and deploying Quartz site...")
@@ -378,7 +563,7 @@ def phase_publish() -> bool:
 
 
 def phase_report(ingest_results: list, note_results: list, publish_success: bool):
-    """Phase 6: Generate summary report."""
+    """Phase 6: Generate summary report and send Telegram notification."""
     logger.info("=== Phase 6: Report ===")
 
     successful_clips = len([r for r in ingest_results if r.get("status") == "success"])
@@ -392,11 +577,14 @@ def phase_report(ingest_results: list, note_results: list, publish_success: bool
 - 클리핑: {successful_clips}개 완료 / {failed_clips}개 실패
 - 노트 생성: {notes_created}개
 - 퍼블리시: {'성공' if publish_success else '실패'}
-- 사이트: https://dataofmen.github.io/
+- 사이트: {SITE_BASE_URL}/
 {'=' * 50}
 """
     print(report)
     logger.info(report)
+
+    # Send Telegram notification
+    notify_telegram(ingest_results, note_results, publish_success)
 
     # Rotate workspace
     workspace_prev = PROJECT_DIR / "_workspace_prev"
@@ -412,6 +600,9 @@ def phase_report(ingest_results: list, note_results: list, publish_success: bool
 
 
 def main():
+    # Clear stale lock file at pipeline start
+    LOCK_FILE.unlink(missing_ok=True)
+
     parser = argparse.ArgumentParser(description="Wiki Pipeline Orchestrator")
     parser.add_argument("--phase", type=str, default="3-6",
                         help="Phase(s) to run: 3, 4, 5, 6, or range like 3-5 (default: 3-6)")
@@ -464,6 +655,12 @@ def main():
                 note_results = phase_note_make(clippings)
             else:
                 logger.warning("No clippings to process for note generation")
+
+    # Skip Phase 5 if no notes were created AND Phase 4 was also requested
+    if 5 in phases and 4 in phases and not note_results:
+        if not args.dry_run:
+            logger.warning("No notes created — skipping publish phase to avoid deploying empty content")
+            phases.discard(5)
 
     # Phase 5: Publisher
     if 5 in phases:
