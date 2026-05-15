@@ -148,7 +148,7 @@ def _vtt_to_text(vtt_content: str) -> str:
     return "\n".join(lines)
 
 
-def fetch_pdf_via_marker(url: str) -> dict:
+def fetch_pdf_via_marker(url: str, output_dir: Path = None) -> dict:
     """Download PDF and convert to markdown using Marker (preserves tables, images, equations)."""
     try:
         from marker.converters.pdf import PdfConverter
@@ -171,24 +171,46 @@ def fetch_pdf_via_marker(url: str) -> dict:
         rendered = converter(tmp)
         text, metadata, images = text_from_rendered(rendered)
 
-        # Extract title from metadata or first heading
-        title = metadata.get("title", "") if isinstance(metadata, dict) else ""
+        # Extract title from content: first meaningful heading
+        title = ""
+        for line in text.splitlines():
+            stripped = line.lstrip("# ").strip()
+            if stripped and len(stripped) > 5 and not stripped.lower().startswith("chapter"):
+                title = stripped
+                break
+        # Fallback: combine "Chapter" heading with next real title
         if not title:
-            for line in text.splitlines():
-                stripped = line.lstrip("# ").strip()
-                if stripped and len(stripped) > 3:
-                    title = stripped
+            lines = text.splitlines()
+            for i, line in enumerate(lines):
+                if line.strip().startswith("#") and "Chapter" in line:
+                    for j in range(i + 1, min(i + 5, len(lines))):
+                        candidate = lines[j].strip()
+                        if candidate and len(candidate) > 3 and not candidate.startswith("#"):
+                            title = candidate
+                            break
                     break
         if not title:
-            title = urlparse(url).path.split("/")[-1].replace(".pdf", "")
+            title = urlparse(url).path.split("/")[-1].replace(".pdf", "").replace("-", " ").strip()
 
-        # Save extracted images alongside clipping
-        # Images dict: {filename: PIL Image or bytes}
-        image_refs = []
-        if images:
-            # Images will be saved by format_clipping as needed
-            # For now, image references are embedded in the markdown
-            pass
+        # Save extracted images to clippings/images/ directory
+        if images and output_dir:
+            img_dir = output_dir / "images"
+            img_dir.mkdir(parents=True, exist_ok=True)
+            date_prefix = datetime.now().strftime("%Y%m%d")
+            for img_name, img_data in images.items():
+                safe_name = re.sub(r'[^\w.]', '_', img_name)
+                if not safe_name.startswith(date_prefix):
+                    safe_name = f"{date_prefix}-{safe_name}"
+                img_path = img_dir / safe_name
+                try:
+                    if hasattr(img_data, 'save'):
+                        img_data.save(str(img_path))
+                    elif isinstance(img_data, bytes):
+                        with open(img_path, 'wb') as f:
+                            f.write(img_data)
+                    text = text.replace(img_name, f"images/{safe_name}")
+                except Exception as e:
+                    print(f"Warning: could not save image {img_name}: {e}")
 
         return {
             "title": title,
@@ -668,7 +690,7 @@ def fetch_and_save(url: str, output_dir: Path, source_type: str = "",
 
     # PDF: use Marker for high-quality conversion (preserves tables, images, equations)
     if is_pdf_url(url):
-        result = fetch_pdf_via_marker(url)
+        result = fetch_pdf_via_marker(url, output_dir=output_dir)
         if result.get("content") and not result.get("error"):
             path = format_clipping(
                 url, result["title"], result["content"],
