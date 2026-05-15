@@ -438,7 +438,13 @@ def phase_note_make(clippings: list[dict]) -> list[dict]:
 4. wiki/concepts/ 또는 wiki/entities/ 에 저장 (type 기준)
 5. 관련 index.md 갱신
 6. log.md에 작업 기록
-7. 완료 목록을 _workspace/note_maker_done.jsonl에 작성"""
+7. 완료 목록을 _workspace/note_maker_done.jsonl에 작성
+
+**위키링크 규칙 (반드시 준수):**
+- 위키링크는 순수 슬러그만 사용: `[[슬러그]]` 형식
+- path-prefixed 위키링크 금지: `[[concepts/슬러그]]`, `[[entities/슬러그]]` 사용 금지
+- 올바른 예: `[[20260515-apple-accidental-moat]]`
+- 잘못된 예: `[[concepts/20260515-apple-accidental-moat]]`"""
 
     # Resolve claude binary — launchd daemon PATH may omit user PATH entries
     _claude_candidates = [
