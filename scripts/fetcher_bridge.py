@@ -581,6 +581,61 @@ def sanitize_slug(slug: str) -> str:
     return ascii_only.strip("-").lower()
 
 
+def _clean_fxtwitter_content(content: str) -> tuple[str, str, str]:
+    """Strip fxtwitter metadata boilerplate. Returns (cleaned_content, author, title).
+
+    fxtwitter returns:
+        **Author**: Name (@handle)
+        **URL**: https://x.com/...
+        **Stats**: N Likes | N Retweets | N Views
+
+        ## Tweet Content
+
+        [actual tweet text]
+    """
+    author = ""
+    title = ""
+    lines = content.splitlines()
+    content_start = 0
+
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        # Extract author name before stripping
+        m = re.match(r'^\*\*Author\*\*:\s*(.+?)\s*\(@\w+\)', stripped)
+        if m:
+            author = m.group(1).strip()
+            content_start = i + 1
+            continue
+        if re.match(r'^\*\*URL\*\*:', stripped):
+            content_start = i + 1
+            continue
+        if re.match(r'^\*\*Stats\*\*:', stripped):
+            content_start = i + 1
+            continue
+        if re.match(r'^##\s+Tweet Content\s*$', stripped):
+            content_start = i + 1
+            continue
+
+    cleaned_lines = lines[content_start:]
+    # Drop leading blank lines
+    while cleaned_lines and not cleaned_lines[0].strip():
+        cleaned_lines.pop(0)
+
+    cleaned = "\n".join(cleaned_lines).strip()
+
+    # Extract title: first non-empty, non-URL line
+    for line in cleaned_lines:
+        s = line.strip()
+        if s and not s.startswith("http"):
+            title = s.lstrip("#").strip()
+            # Truncate at 80 chars for title
+            if len(title) > 80:
+                title = title[:77].rstrip() + "…"
+            break
+
+    return cleaned, author, title
+
+
 def _clean_jina_content(content: str, title: str) -> str:
     """Strip Jina AI metadata headers and duplicate H1 from fetched body content."""
     lines = content.splitlines()
@@ -615,11 +670,17 @@ def format_clipping(url: str, title: str, content: str, method: str,
     """Write a clipping .md file with YAML front matter."""
     # Decode percent-encoded URLs (e.g. Korean slugs) for readability
     url = unquote(url)
+    author = ""
     # Clean platform-specific boilerplate before storing
     if is_linkedin_url(url):
         content = _clean_linkedin_content(content)
     if is_twitter_url(url):
         content = _clean_x_content(content)
+    # fxtwitter: strip Author/URL/Stats/## Tweet Content metadata and extract author+title
+    if method == "fxtwitter" and (source_type == "thread" or is_twitter_url(url)):
+        content, author, extracted_title = _clean_fxtwitter_content(content)
+        if extracted_title and (not title or title.startswith("Tweet by") or title.startswith("tweet")):
+            title = extracted_title
     # Strip Jina metadata headers from all non-thread content
     if source_type != "thread" and not is_twitter_url(url):
         content = _clean_jina_content(content, title)
@@ -641,7 +702,7 @@ def format_clipping(url: str, title: str, content: str, method: str,
         "source_type": source_type,
         "clipped_at": datetime.now().isoformat(),
         "title": title,
-        "author": "",
+        "author": author,
         "word_count": word_count,
         "fetch_method": method,
         "status": "clipped",
@@ -651,11 +712,8 @@ def format_clipping(url: str, title: str, content: str, method: str,
     front_matter = f"---\n{_yaml_dump(front_matter_data)}\n---\n"
 
     if source_type == "thread" or is_twitter_url(url):
-        body = f"""원본: [{url}]({url})
-
----
-
-{content}
+        # Single footer link — no duplicate URL header
+        body = f"""{content}
 
 ---
 *원문: [{url}]({url})*
