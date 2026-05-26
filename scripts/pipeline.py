@@ -84,7 +84,17 @@ def _load_dotenv_value(key: str) -> str:
     return ""
 
 
-def notify_telegram(ingest_results: list, note_results: list, publish_success: bool) -> bool:
+def _publish_label(publish_success) -> tuple[str, str]:
+    """Return (icon, label) for publish status. publish_success: True/False/None(skipped)."""
+    if publish_success is True:
+        return "✅", "성공"
+    elif publish_success is None:
+        return "⏭️", "건너뜀"
+    else:
+        return "❌", "실패"
+
+
+def notify_telegram(ingest_results: list, note_results: list, publish_success) -> bool:
     """Send pipeline completion summary to Telegram."""
     try:
         import requests as _requests
@@ -103,15 +113,16 @@ def notify_telegram(ingest_results: list, note_results: list, publish_success: b
 
     successful_clips = len([r for r in ingest_results if r.get("status") == "success"])
     failed_clips = len([r for r in ingest_results if r.get("status") == "error"])
-    publish_icon = "✅" if publish_success else "❌"
+    publish_icon, publish_text = _publish_label(publish_success)
+    pipeline_icon = publish_icon if publish_success is not True else "✅"
 
     lines = [
-        f"{publish_icon} *파이프라인 완료* — {datetime.now().strftime('%m/%d %H:%M')}",
+        f"{pipeline_icon} *파이프라인 완료* — {datetime.now().strftime('%m/%d %H:%M')}",
         "",
         f"📥 수신: {len(ingest_results)}개",
         f"📄 클리핑: {successful_clips}개 성공 / {failed_clips}개 실패",
         f"📝 노트: {len(note_results)}개 생성",
-        f"🌐 퍼블리시: {'성공' if publish_success else '실패'}",
+        f"🌐 퍼블리시: {publish_text}",
     ]
 
     if note_results:
@@ -527,7 +538,7 @@ def phase_publish() -> bool:
     logger.info("Checking links...")
     run_cmd(["python3", str(SCRIPTS_DIR / "check_links.py")], check=False)
 
-    # Step 3: Push 0004_Wikis content to GitHub (build pulls from this repo)
+    # Step 3: Push 0004_Wikis content to GitHub (GitHub Actions pulls from this repo)
     logger.info("Pushing content to GitHub...")
     run_cmd(["git", "add", "wiki/", "garden/", "clippings/", "scripts/", "index.md"],
             cwd=PROJECT_DIR, check=False)
@@ -536,17 +547,19 @@ def phase_publish() -> bool:
         ["git", "commit", "-m", f"content: pipeline auto-publish {ts}"],
         cwd=PROJECT_DIR, check=False,
     )
-    if commit_result.returncode == 0:
-        push_result = run_cmd(["git", "push", "origin", "main"], cwd=PROJECT_DIR, check=False)
-        if push_result.returncode != 0:
-            logger.warning(f"git push failed (non-fatal): {push_result.stderr[:200]}")
-    else:
+    if commit_result.returncode != 0:
         logger.info("Nothing new to commit for 0004_Wikis")
+    # Always push — GitHub Actions reads from the remote, not local commits
+    push_result = run_cmd(["git", "push", "origin", "main"], cwd=PROJECT_DIR, check=False)
+    if push_result.returncode != 0:
+        logger.warning(f"git push failed (non-fatal): {push_result.stderr[:200]}")
 
     # Step 4: Build and deploy
     logger.info("Building and deploying Quartz site...")
+    # Use absolute npx path — daemon PATH (/usr/bin:/bin/...) omits /opt/homebrew/bin
+    npx = shutil.which("npx") or "/opt/homebrew/bin/npx"
     deploy_result = run_cmd(
-        ["npx", "quartz", "sync"],
+        [npx, "quartz", "sync"],
         cwd=QUARTZ_DIR,
         check=False,
     )
@@ -569,13 +582,14 @@ def phase_publish() -> bool:
     return success
 
 
-def phase_report(ingest_results: list, note_results: list, publish_success: bool):
+def phase_report(ingest_results: list, note_results: list, publish_success):
     """Phase 6: Generate summary report and send Telegram notification."""
     logger.info("=== Phase 6: Report ===")
 
     successful_clips = len([r for r in ingest_results if r.get("status") == "success"])
     failed_clips = len([r for r in ingest_results if r.get("status") == "error"])
     notes_created = len(note_results)
+    _, publish_text = _publish_label(publish_success)
 
     report = f"""
 파이프라인 실행 결과 — {datetime.now().strftime('%Y-%m-%d %H:%M')}
@@ -583,7 +597,7 @@ def phase_report(ingest_results: list, note_results: list, publish_success: bool
 - 수신: {len(ingest_results)}개 항목
 - 클리핑: {successful_clips}개 완료 / {failed_clips}개 실패
 - 노트 생성: {notes_created}개
-- 퍼블리시: {'성공' if publish_success else '실패'}
+- 퍼블리시: {publish_text}
 - 사이트: {SITE_BASE_URL}/
 {'=' * 50}
 """
@@ -630,7 +644,7 @@ def main():
 
     ingest_results = []
     note_results = []
-    publish_success = False
+    publish_success = None  # None=skipped, True=success, False=failed
 
     # Phase 3: Ingest
     if 3 in phases:
@@ -666,7 +680,8 @@ def main():
     # Skip Phase 5 if no notes were created AND Phase 4 was also requested
     if 5 in phases and 4 in phases and not note_results:
         if not args.dry_run:
-            logger.warning("No notes created — skipping publish phase to avoid deploying empty content")
+            logger.info("No notes created — skipping publish (nothing new to deploy)")
+            publish_success = None  # skipped, not failed
             phases.discard(5)
 
     # Phase 5: Publisher
@@ -674,11 +689,19 @@ def main():
         if args.dry_run:
             print("[DRY RUN] Would run Quartz build + deploy")
         else:
-            publish_success = phase_publish()
+            try:
+                result = phase_publish()
+                publish_success = True if result else False
+            except Exception as e:
+                logger.error(f"phase_publish crashed: {e}")
+                publish_success = False
 
-    # Phase 6: Report
+    # Phase 6: Report — always runs even if earlier phases crashed
     if 6 in phases and not args.dry_run:
-        phase_report(ingest_results, note_results, publish_success)
+        try:
+            phase_report(ingest_results, note_results, publish_success)
+        except Exception as e:
+            logger.error(f"phase_report crashed: {e}")
 
     logger.info("Pipeline complete")
 
