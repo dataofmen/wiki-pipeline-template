@@ -231,9 +231,43 @@ def handle_text(message):
 
 if __name__ == "__main__":
     import time
-    logging.info("Kiwi bot starting...")
+    import fcntl
+
+    LOCK_FILE = Path(__file__).parent / ".kiwi_bot.lock"
+
+    # Single-instance guard: exit immediately if another instance holds the lock
+    lock_fd = open(LOCK_FILE, "w")
     try:
-        bot.delete_webhook()
-    except Exception:
-        pass
-    bot.polling(none_stop=True, interval=2, timeout=10, long_polling_timeout=8)
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        logging.warning("Another kiwi_bot instance is already running — exiting")
+        raise SystemExit(0)
+
+    lock_fd.write(str(os.getpid()))
+    lock_fd.flush()
+
+    logging.info("Kiwi bot starting...")
+    # Delete webhook and wait for Telegram to release the previous long-poll session
+    for attempt in range(5):
+        try:
+            bot.delete_webhook()
+            break
+        except Exception as e:
+            logging.warning(f"delete_webhook attempt {attempt+1}: {e}")
+            time.sleep(3)
+
+    # Small delay so Telegram can release any previous getUpdates session
+    time.sleep(5)
+
+    while True:
+        try:
+            bot.polling(none_stop=False, interval=2, timeout=30, long_polling_timeout=25)
+        except Exception as e:
+            err_str = str(e)
+            if "409" in err_str or "Conflict" in err_str:
+                # Another instance grabbed the session — wait and retry
+                logging.warning(f"409 conflict, waiting 15s before retry: {e}")
+                time.sleep(15)
+            else:
+                logging.error(f"Polling error, retrying in 5s: {e}")
+                time.sleep(5)
