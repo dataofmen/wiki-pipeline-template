@@ -163,7 +163,7 @@ def notify_telegram(ingest_results: list, note_results: list, publish_success) -
     return all_ok
 
 
-def run_cmd(cmd: list[str], cwd: Path | None = None, check: bool = True) -> subprocess.CompletedProcess:
+def run_cmd(cmd: list[str], cwd: Path | None = None, check: bool = True, env: dict | None = None) -> subprocess.CompletedProcess:
     """Run a command and log output."""
     logger.info(f"Running: {' '.join(cmd)}")
     result = subprocess.run(
@@ -173,6 +173,7 @@ def run_cmd(cmd: list[str], cwd: Path | None = None, check: bool = True) -> subp
         encoding="utf-8",
         errors="replace",
         check=False,
+        env=env,
     )
     if result.stdout:
         logger.info(result.stdout.strip())
@@ -556,12 +557,17 @@ def phase_publish() -> bool:
 
     # Step 4: Build and deploy
     logger.info("Building and deploying Quartz site...")
-    # Use absolute npx path — daemon PATH (/usr/bin:/bin/...) omits /opt/homebrew/bin
-    npx = shutil.which("npx") or "/opt/homebrew/bin/npx"
+    # Daemon PATH omits /opt/homebrew/bin — inject it explicitly so npx can find node
+    import os as _os
+    brew_bin = "/opt/homebrew/bin"
+    node_env = _os.environ.copy()
+    node_env["PATH"] = f"{brew_bin}:{node_env.get('PATH', '/usr/bin:/bin')}"
+    npx = shutil.which("npx", path=node_env["PATH"]) or f"{brew_bin}/npx"
     deploy_result = run_cmd(
         [npx, "quartz", "sync"],
         cwd=QUARTZ_DIR,
         check=False,
+        env=node_env,
     )
 
     success = deploy_result.returncode == 0
