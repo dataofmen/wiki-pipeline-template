@@ -127,6 +127,97 @@ def is_youtube_url(url: str) -> bool:
     return "youtube.com" in domain or "youtu.be" in domain
 
 
+def is_youtube_video_url(url: str) -> bool:
+    """Returns True only for actual video URLs (not community posts, channels, etc.)."""
+    if not is_youtube_url(url):
+        return False
+    path = urlparse(url).path
+    # Exclude community posts (/post/...), channels, playlists, etc.
+    if re.search(r"/post/|/@|/channel/|/c/|/user/|/playlist", path):
+        return False
+    return bool(re.search(r"[?&]v=", url) or "youtu.be/" in url)
+
+
+def fetch_via_fxtwitter(url: str) -> dict:
+    """X.com/Twitter 전용: api.fxtwitter.com으로 tweet 본문 추출.
+
+    ultimate-fetcher 없이도 X.com 로그인 장벽을 우회한다.
+    """
+    tweet_match = re.search(r"/status/(\d+)", url)
+    if not tweet_match:
+        return {}
+    tweet_id = tweet_match.group(1)
+    api_url = f"https://api.fxtwitter.com/status/{tweet_id}"
+    try:
+        req = __import__("urllib.request", fromlist=["urlopen"]).urlopen(api_url, timeout=15)
+        data = json.loads(req.read().decode("utf-8"))
+    except Exception as e:
+        print(f"fxtwitter API 실패: {e}", file=sys.stderr)
+        return {}
+
+    tweet = data.get("tweet", {})
+    if not tweet:
+        return {}
+
+    author_name = tweet.get("author", {}).get("name", "")
+    author_screen = tweet.get("author", {}).get("screen_name", "")
+    text = tweet.get("text", "")
+    replies = tweet.get("replies") or []
+    article = tweet.get("article") or {}
+
+    # X Article (Note Tweet): text 비어 있고 article.content.blocks 있는 경우
+    if not text and article:
+        article_title = article.get("title", "")
+        blocks = article.get("content", {}).get("blocks", [])
+        article_lines = []
+        if article_title:
+            article_lines.append(f"# {article_title}")
+        for block in blocks:
+            block_text = block.get("text", "").strip()
+            if block_text:
+                article_lines.append(block_text)
+        text = "\n\n".join(article_lines)
+
+    # thread 필드가 list인 경우 스레드 본문 조합, 아니면 단일 트윗
+    parts = [text]
+    if isinstance(replies, list):
+        for r in replies:
+            r_text = r.get("text", "")
+            if r_text and r_text != text:
+                parts.append(r_text)
+    elif isinstance(tweet.get("thread"), list):
+        for r in tweet["thread"]:
+            r_text = r.get("text", "")
+            if r_text and r_text != text:
+                parts.append(r_text)
+    full_text = "\n\n".join(p for p in parts if p).strip()
+
+    if not full_text:
+        return {}
+
+    # 제목: 첫 비-URL 줄 최대 80자
+    title = ""
+    for line in full_text.splitlines():
+        s = line.strip().lstrip("#")
+        if s and not s.startswith("http"):
+            title = s[:80].rstrip()
+            if len(s) > 80:
+                title += "…"
+            break
+    if author_name:
+        title = f"{author_name} — {title}" if title else author_name
+
+    content = full_text + f"\n\n*원문: [{url}]({url})*"
+    return {
+        "title": title,
+        "author": author_name,
+        "author_screen": author_screen,
+        "content": content,
+        "method": "fxtwitter",
+        "domain_hint": "general",
+    }
+
+
 def _vtt_to_text(vtt_content: str) -> str:
     """Convert VTT subtitle content to clean, deduplicated transcript text."""
     lines = []
@@ -815,6 +906,30 @@ def fetch_and_save(url: str, output_dir: Path, source_type: str = "",
     output_dir.mkdir(parents=True, exist_ok=True)
     source_type = determine_source_type(url, source_type)
 
+    # X.com/Twitter: fxtwitter API 직접 호출 (readability-js 폴백 전에 처리)
+    if is_twitter_url(url):
+        fx = fetch_via_fxtwitter(url)
+        if fx.get("content"):
+            path = format_clipping(
+                url, fx["title"], fx["content"],
+                fx["method"], "thread",
+                fx["domain_hint"], output_dir,
+            )
+            # author 필드 직접 업데이트
+            if fx.get("author"):
+                import re as _re
+                text = path.read_text(encoding="utf-8")
+                text = _re.sub(r'^author: .*$', f'author: {fx["author"]}', text, flags=_re.MULTILINE)
+                path.write_text(text, encoding="utf-8")
+            return {
+                "source_url": url,
+                "clipping_path": str(path),
+                "status": "success",
+                "domain_hint": fx["domain_hint"],
+                "fetch_method": fx["method"],
+            }
+        # fxtwitter 실패 시 ultimate-fetcher/readability-js 폴백 허용
+
     # PDF: use Marker for high-quality conversion (preserves tables, images, equations)
     if is_pdf_url(url):
         result = fetch_pdf_via_marker(url, output_dir=output_dir)
@@ -833,8 +948,8 @@ def fetch_and_save(url: str, output_dir: Path, source_type: str = "",
             }
         # Marker failed — fall through to general fetcher
 
-    # YouTube: use yt-dlp transcript directly (more useful than metadata scraping)
-    if is_youtube_url(url) and Path(YT_DLP).exists():
+    # YouTube video: use yt-dlp transcript (community posts / channels skip this)
+    if is_youtube_video_url(url) and Path(YT_DLP).exists():
         result = fetch_youtube_transcript(url)
         if result.get("content") and not result.get("error"):
             path = format_clipping(
