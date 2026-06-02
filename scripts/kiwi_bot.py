@@ -147,18 +147,51 @@ def handle_document(message):
         return
     sender = message.from_user.username or str(message.from_user.id)
     ts = timestamp_slug()
-    target_dir = INBOX_DIR / "pdfs"
-    target_dir.mkdir(parents=True, exist_ok=True)
+    fname = message.document.file_name or ""
+    caption = message.caption or ""
 
     file_info = bot.get_file(message.document.file_id)
     downloaded = bot.download_file(file_info.file_path)
-    pdf_path = target_dir / f"{ts}_{message.document.file_name}"
+
+    # .txt / .md 파일 → texts 폴더로 라우팅 (트랜스크립트, 메모 등)
+    if fname.lower().endswith((".txt", ".md")):
+        target_dir = INBOX_DIR / "texts"
+        target_dir.mkdir(parents=True, exist_ok=True)
+        file_path = target_dir / f"{ts}_{fname}"
+        file_path.write_bytes(downloaded)
+
+        # 캡션에서 YouTube URL 추출
+        source_url = next((w for w in caption.split() if w.startswith("http")), "")
+        title = caption.replace(source_url, "").strip() if source_url else caption.strip()
+        if not title:
+            title = fname.replace(".txt", "").replace(".md", "").replace("_", " ")
+
+        meta_path = target_dir / f"{ts}_{fname}.meta.yaml"
+        meta_path.write_text(
+            f"received_at: {datetime.now().isoformat()}\nsender: {sender}\n"
+            f"original_name: {fname}\ntitle: {title}\n"
+            f"source_url: {source_url}\ntype: text\nstatus: pending\n"
+        )
+        append_workspace_log(file_path, "text")
+        append_inbox_log(file_path, "text", sender)
+        try:
+            hint = f"\n소스 URL: {source_url}" if source_url else "\n⚠️ 캡션에 YouTube URL을 포함하면 출처가 연결됩니다."
+            bot.reply_to(message, f"텍스트 파일 저장 완료: {file_path.name}{hint}")
+        except Exception as e:
+            logging.error(f"reply error: {e}")
+        logging.info(f"Text saved: {file_path}")
+        return
+
+    # PDF → 기존 처리
+    target_dir = INBOX_DIR / "pdfs"
+    target_dir.mkdir(parents=True, exist_ok=True)
+    pdf_path = target_dir / f"{ts}_{fname}"
     pdf_path.write_bytes(downloaded)
 
-    meta_path = target_dir / f"{ts}_{message.document.file_name}.meta.yaml"
+    meta_path = target_dir / f"{ts}_{fname}.meta.yaml"
     meta_path.write_text(
         f"received_at: {datetime.now().isoformat()}\nsender: {sender}\n"
-        f"original_name: {message.document.file_name}\ncaption: {message.caption or ''}\n"
+        f"original_name: {fname}\ncaption: {caption}\n"
         f"type: pdf\nstatus: pending\n"
     )
 
