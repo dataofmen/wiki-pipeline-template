@@ -187,14 +187,31 @@ def run_cmd(cmd: list[str], cwd: Path | None = None, check: bool = True, env: di
     return result
 
 
+def _normalize_url(url: str) -> str:
+    """Strip quotes, fragments, and tracking-only query params for dedup comparison."""
+    from urllib.parse import urlparse, urlencode, parse_qsl
+    url = url.strip().strip('"').strip("'")
+    try:
+        p = urlparse(url)
+        # Remove tracking-only params that change per share link
+        TRACKING_PARAMS = {"si", "utm_source", "utm_medium", "utm_campaign",
+                           "utm_term", "utm_content", "fbclid", "gclid", "ref"}
+        qs = [(k, v) for k, v in parse_qsl(p.query) if k not in TRACKING_PARAMS]
+        normalized = p._replace(query=urlencode(qs), fragment="").geturl()
+        return normalized.rstrip("/")
+    except Exception:
+        return url.rstrip("/")
+
+
 def _get_already_clipped_urls() -> set[str]:
-    """Return set of URLs already present in clippings/."""
+    """Return normalized set of URLs already present in clippings/."""
     clipped = set()
     for cf in CLIPPINGS_DIR.glob("*.md"):
         try:
             for line in cf.read_text(errors="ignore").split("\n"):
                 if line.startswith("source_url:"):
-                    clipped.add(line.split("source_url:", 1)[1].strip())
+                    raw = line.split("source_url:", 1)[1].strip()
+                    clipped.add(_normalize_url(raw))
                     break
         except Exception:
             pass
@@ -227,7 +244,7 @@ def scan_inbox() -> list[dict]:
                     inbox_path = PROJECT_DIR / entry["inbox_path"]
                     if inbox_path.exists():
                         source_url = entry.get("source_url", "")
-                        if source_url and source_url in already_clipped:
+                        if source_url and _normalize_url(source_url) in already_clipped:
                             logger.info(f"Skipping already-clipped URL: {source_url}")
                             _mark_inbox_processed(str(inbox_path))
                             continue
@@ -252,7 +269,7 @@ def scan_inbox() -> list[dict]:
                         if line.startswith("source_url:"):
                             url = line.split("source_url:", 1)[1].strip()
                             break
-                    if url and url in already_clipped:
+                    if url and _normalize_url(url) in already_clipped:
                         logger.info(f"Skipping already-clipped URL: {url}")
                         _mark_inbox_processed(str(f))
                         continue
