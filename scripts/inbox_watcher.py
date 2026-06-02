@@ -15,7 +15,13 @@ from watchdog.events import FileSystemEventHandler
 INBOX_DIR = Path(__file__).parent.parent / "inbox"
 PROJECT_DIR = Path(__file__).parent.parent
 SCRIPTS_DIR = Path(__file__).parent.parent / "scripts"
+LOCK_FILE = SCRIPTS_DIR / ".pipeline.lock"
 VENV_PYTHON = str(Path(__file__).parent.parent / ".venv" / "bin" / "python3")
+# Prefer project venv, fall back to ultimate-fetcher venv, then system python
+if not Path(VENV_PYTHON).exists():
+    ALT_PYTHON = Path.home() / "Projects" / "ultimate-fetcher" / ".venv" / "bin" / "python3"
+    if ALT_PYTHON.exists():
+        VENV_PYTHON = str(ALT_PYTHON)
 
 logging.basicConfig(
     filename=Path(__file__).parent / "watcher.log",
@@ -43,6 +49,17 @@ class InboxHandler(FileSystemEventHandler):
     def trigger_if_ready(self):
         if self._pending and (time.time() - self._last_event) >= DEBOUNCE_SECONDS:
             self._pending = False
+            # Lock file to prevent concurrent pipeline runs
+            if LOCK_FILE.exists():
+                lock_age = time.time() - LOCK_FILE.stat().st_mtime
+                if lock_age < 600:  # Lock is less than 10 min old
+                    logging.info("Pipeline already running, skipping trigger.")
+                    return
+                else:
+                    logging.warning("Stale lock file detected (>10 min), removing.")
+                    LOCK_FILE.unlink(missing_ok=True)
+
+            LOCK_FILE.touch()
             python_bin = VENV_PYTHON if Path(VENV_PYTHON).exists() else "python3"
             logging.info(f"Python 파이프라인 트리거 ({python_bin})")
             subprocess.Popen(
