@@ -6,6 +6,7 @@ import sys
 import re
 import json
 import argparse
+import yaml
 from pathlib import Path
 from datetime import datetime
 from urllib.parse import urlparse
@@ -58,7 +59,7 @@ def fetch_via_vxtwitter(url: str) :
         tweet_id = extract_tweet_id(url)
         if not tweet_id:
             return None
-        api_url = f"https://api.vxtwitter.com/aleabitoreddit/status/{tweet_id}"
+        api_url = f"https://api.vxtwitter.com/twitter/status/{tweet_id}"
         resp = requests.get(api_url, timeout=20,
                             headers={"User-Agent": "Mozilla/5.0"})
         if resp.status_code == 200:
@@ -99,28 +100,19 @@ def save_clipping(url: str, content: str, output_dir: Path) -> Path:
     word_count = len(content.split())
 
     # X.com 스레드는 항상 general 또는 원문 분석에 맡김
-    front_matter = f"""---
-source_url: {url}
-source_type: thread
-clipped_at: {datetime.now().isoformat()}
-title: X.com Thread — {slug}
-author: ""
-word_count: {word_count}
-fetch_method: nitter
-status: clipped
-domain_hint: general
-tags: [thread, x.com]
----
-
-원본: [{url}]({url})
-
----
-
-{content}
-
----
-*원문: [{url}]({url})*
-"""
+    front_matter_data = {
+        "source_url": url,
+        "source_type": "thread",
+        "clipped_at": datetime.now().isoformat(),
+        "title": f"X.com Thread — {slug}",
+        "author": "",
+        "word_count": word_count,
+        "fetch_method": "nitter",
+        "status": "clipped",
+        "domain_hint": "general",
+        "tags": ["thread", "x.com"],
+    }
+    front_matter = f"---\n{yaml.dump(front_matter_data, allow_unicode=True, default_flow_style=False).strip()}\n---\n\n원본: [{url}]({url})\n\n---\n\n{content}\n\n---\n*원문: [{url}]({url})*\n"
     path = output_dir / filename
     path.write_text(front_matter)
     return path
