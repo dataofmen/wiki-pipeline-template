@@ -3,10 +3,7 @@
 # Or use: bash scripts/setup_venv.sh
 
 # Core fetcher (3-phase adaptive + platform plugins)
-# Install from local path or GitHub:
-# pip install -e /path/to/ultimate-fetcher
-# Or: pip install git+https://github.com/dataofmen/ultimate-fetcher.git
-ultimate-fetcher
+ultimate-fetcher @ git+https://github.com/dataofmen/ultimate-fetcher.git
 
 # PDF extraction (not covered by ultimate-fetcher)
 pdfplumber
