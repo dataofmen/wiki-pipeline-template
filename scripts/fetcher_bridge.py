@@ -894,6 +894,38 @@ def _run_as_subprocess(url: str, output_dir: Path, source_type: str, python_bin:
     }
 
 
+def _normalize_url_for_dedup(url: str) -> str:
+    """Strip tracking params and trailing slash for duplicate detection."""
+    from urllib.parse import urlencode, parse_qsl
+    url = url.strip().strip('"').strip("'")
+    try:
+        p = urlparse(url)
+        TRACKING = {"si", "utm_source", "utm_medium", "utm_campaign",
+                    "utm_term", "utm_content", "fbclid", "gclid", "ref"}
+        qs = [(k, v) for k, v in parse_qsl(p.query) if k not in TRACKING]
+        return p._replace(query=urlencode(qs), fragment="").geturl().rstrip("/")
+    except Exception:
+        return url.rstrip("/")
+
+
+def find_existing_clipping(url: str, output_dir: Path) -> Path | None:
+    """Return path to existing clipping with same normalized URL, or None."""
+    target = _normalize_url_for_dedup(url)
+    for cf in output_dir.glob("*.md"):
+        try:
+            for line in cf.read_text(errors="ignore").split("\n"):
+                if line.startswith("source_url:"):
+                    existing = _normalize_url_for_dedup(
+                        line.split("source_url:", 1)[1].strip()
+                    )
+                    if existing == target:
+                        return cf
+                    break
+        except Exception:
+            pass
+    return None
+
+
 def fetch_and_save(url: str, output_dir: Path, source_type: str = "",
                    python_bin: str = "") -> dict:
     """Sync entry point. Fetches via ultimate-fetcher and saves clipping file.
@@ -904,6 +936,20 @@ def fetch_and_save(url: str, output_dir: Path, source_type: str = "",
     Returns dict with: source_url, clipping_path, status, domain_hint, fetch_method
     """
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Dedup check: return existing clipping if same URL was already clipped
+    existing = find_existing_clipping(url, output_dir)
+    if existing:
+        import logging as _log
+        _log.getLogger(__name__).info(f"Dedup: reusing existing clipping {existing.name} for {url}")
+        return {
+            "source_url": url,
+            "clipping_path": str(existing),
+            "status": "duplicate",
+            "domain_hint": "general",
+            "fetch_method": "dedup",
+        }
+
     source_type = determine_source_type(url, source_type)
 
     # X.com/Twitter: fxtwitter API 직접 호출 (readability-js 폴백 전에 처리)
