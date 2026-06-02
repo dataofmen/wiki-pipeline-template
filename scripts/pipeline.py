@@ -254,7 +254,7 @@ def scan_inbox() -> list[dict]:
         logger.info(f"Found {len(pending)} pending items from kiwi")
 
     # Also scan inbox/ for any unprocessed files
-    for subdir in ["urls", "threads", "pdfs"]:
+    for subdir in ["urls", "threads", "pdfs", "texts"]:
         dir_path = INBOX_DIR / subdir
         if not dir_path.exists():
             continue
@@ -273,7 +273,7 @@ def scan_inbox() -> list[dict]:
                         logger.info(f"Skipping already-clipped URL: {url}")
                         _mark_inbox_processed(str(f))
                         continue
-                    entry_type = "thread" if subdir == "threads" else ("pdf" if subdir == "pdfs" else "url")
+                    entry_type = "thread" if subdir == "threads" else ("pdf" if subdir == "pdfs" else ("text" if subdir == "texts" else "url"))
                     pending.append({
                         "source_url": url,
                         "type": entry_type,
@@ -282,7 +282,27 @@ def scan_inbox() -> list[dict]:
                         "status": "processing",
                         "received_at": datetime.now().isoformat(),
                     })
-        # Also handle direct file drops (not .md, like .pdf files)
+        # Also handle direct file drops (not .md, like .pdf or .txt files)
+        if subdir == "texts":
+            for f in dir_path.glob("*.txt"):
+                meta_path = f.parent / f"{f.stem}.meta.yaml"
+                if not any(p.get("inbox_path", "").endswith(f.name) for p in pending):
+                    source_url, title = "", f.stem.replace("_", " ")
+                    if meta_path.exists():
+                        for line in meta_path.read_text(errors="ignore").split("\n"):
+                            if line.startswith("source_url:"):
+                                source_url = line.split("source_url:", 1)[1].strip()
+                            if line.startswith("title:"):
+                                title = line.split("title:", 1)[1].strip()
+                    pending.append({
+                        "source_url": source_url,
+                        "title": title,
+                        "type": "text",
+                        "inbox_path": str(f.relative_to(PROJECT_DIR)),
+                        "inbox_path_resolved": str(f),
+                        "status": "processing",
+                        "received_at": datetime.now().isoformat(),
+                    })
         if subdir == "pdfs":
             for f in dir_path.glob("*.pdf"):
                 if not any(p.get("inbox_path", "").endswith(f.name) for p in pending):
@@ -317,8 +337,28 @@ def phase_ingest(pending: list[dict]) -> list[dict]:
         logger.info(f"Processing: {source_url or inbox_path} (type: {source_type})")
 
         try:
+            # Text file (transcript, memo) → direct clipping without fetching
+            if source_type == "text" and inbox_path and Path(inbox_path).exists():
+                from fetcher_bridge import format_clipping, detect_domain_hint
+                content = Path(inbox_path).read_text(errors="ignore").strip()
+                title = item.get("title") or Path(inbox_path).stem.replace("_", " ")
+                domain_hint = detect_domain_hint(source_url or "", title, content)
+                clipping_path = format_clipping(
+                    source_url or inbox_path, title, content,
+                    "text-file", "text", domain_hint, CLIPPINGS_DIR,
+                )
+                _mark_inbox_processed(inbox_path)
+                results.append({
+                    "source_url": source_url or inbox_path,
+                    "clipping_path": str(clipping_path),
+                    "status": "success",
+                    "domain_hint": domain_hint,
+                    "fetch_method": "text-file",
+                })
+                logger.info(f"Text clipping saved: {clipping_path}")
+
             # PDF extraction stays as subprocess (ultimate-fetcher has no PDF plugin)
-            if source_type == "pdf" and inbox_path:
+            elif source_type == "pdf" and inbox_path:
                 python_bin = VENV_PYTHON if os.path.exists(VENV_PYTHON) else "python3"
                 result = run_cmd(
                     [python_bin, str(SCRIPTS_DIR / "extract_pdf.py"), inbox_path, "--output", str(CLIPPINGS_DIR)],
