@@ -501,6 +501,23 @@ def phase_note_make(clippings: list[dict], timeout: int = 3600) -> list[dict]:
     skipped = len(successful_clippings) - len(valid_clippings)
     if skipped:
         logger.warning(f"Skipping {skipped} empty/failed clippings")
+        
+    # Load already processed clippings
+    processed_paths = set()
+    note_maker_done = WORKSPACE_DIR / "note_maker_done.jsonl"
+    if note_maker_done.exists():
+        with open(note_maker_done) as f:
+            for line in f:
+                try:
+                    data = json.loads(line.strip())
+                    if "clipping_path" in data:
+                        processed_paths.add(data["clipping_path"])
+                except Exception:
+                    pass
+                    
+    valid_clippings = [c for c in valid_clippings if c["clipping_path"] not in processed_paths]
+    logger.info(f"Skipping {len(processed_paths)} already processed clippings. Remaining to process: {len(valid_clippings)}")
+
     successful_clippings = valid_clippings
     if not successful_clippings:
         logger.warning("No successful clippings to process")
