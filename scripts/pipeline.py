@@ -491,7 +491,7 @@ def _is_empty_clipping(path: str) -> bool:
         return True
 
 
-def phase_note_make(clippings: list[dict], timeout: int = 600) -> list[dict]:
+def phase_note_make(clippings: list[dict], timeout: int = 3600) -> list[dict]:
     """Phase 4: Generate notes using Claude Code with session reuse."""
     logger.info(f"=== Phase 4: Note Maker ({len(clippings)} clippings) ===")
 
@@ -707,8 +707,8 @@ def main():
                         help="Phase(s) to run: 3, 4, 5, 6, or range like 3-5 (default: 3-6)")
     parser.add_argument("--dry-run", action="store_true",
                         help="Show what would be done without executing")
-    parser.add_argument("--timeout", type=int, default=600,
-                        help="Timeout in seconds for Phase 4 Claude Code (default: 600)")
+    parser.add_argument("--timeout", type=int, default=3600,
+                        help="Timeout in seconds for Phase 4 Claude Code (default: 3600)")
     args = parser.parse_args()
 
     # Parse phase range

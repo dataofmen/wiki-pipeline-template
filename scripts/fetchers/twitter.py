@@ -46,6 +46,13 @@ def fetch_via_fxtwitter(url: str) -> dict:
             if block_text:
                 article_lines.append(block_text)
         text = "\n\n".join(article_lines)
+    
+    quote = tweet.get("quote") or {}
+    if quote:
+        quote_text = quote.get("text", "").strip()
+        quote_author = quote.get("author", {}).get("name", "")
+        if quote_text:
+            text = text + f"\n\n[Quote from {quote_author}]:\n{quote_text}"
 
     # thread 필드가 list인 경우 스레드 본문 조합, 아니면 단일 트윗
     parts = [text]

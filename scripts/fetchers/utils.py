@@ -2,6 +2,7 @@ import re
 from datetime import datetime
 from urllib.parse import urlparse, unquote
 from pathlib import Path
+import unicodedata
 
 def _yaml_dump(data: dict) -> str:
     """Minimal YAML serializer for frontmatter dicts (no pyyaml dependency)."""
@@ -101,9 +102,11 @@ def format_clipping(url: str, title: str, content: str, method: str,
     if is_linkedin_url(url):
         content = _clean_linkedin_content(content)
     if is_twitter_url(url):
+        from fetchers.twitter import _clean_x_content
         content = _clean_x_content(content)
     # fxtwitter: strip Author/URL/Stats/## Tweet Content metadata and extract author+title
     if method == "fxtwitter" and (source_type == "thread" or is_twitter_url(url)):
+        from fetchers.twitter import _clean_fxtwitter_content
         content, author, extracted_title = _clean_fxtwitter_content(content)
         if extracted_title and (not title or title.startswith("Tweet by") or title.startswith("tweet")):
             title = extracted_title
@@ -180,6 +183,15 @@ def is_reddit_url(url: str) -> bool:
 
 def is_linkedin_url(url: str) -> bool:
     return "linkedin.com" in urlparse(url).netloc.lower()
+
+def is_twitter_url(url: str) -> bool:
+    domain = urlparse(url).netloc.lower()
+    return "twitter.com" in domain or "x.com" in domain
+
+def is_youtube_url(url: str) -> bool:
+    domain = urlparse(url).netloc.lower()
+    return "youtube.com" in domain or "youtu.be" in domain
+
 
 def _clean_linkedin_content(content: str) -> str:
     """Strip LinkedIn navigation noise, keeping only the post body text and article link."""
