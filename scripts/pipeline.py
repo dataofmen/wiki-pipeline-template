@@ -511,12 +511,12 @@ def phase_note_make(clippings: list[dict], timeout: int = 3600) -> list[dict]:
                 try:
                     data = json.loads(line.strip())
                     if "clipping_path" in data:
-                        processed_paths.add(data["clipping_path"])
+                        processed_paths.add(Path(data["clipping_path"]).name)
                 except Exception:
                     pass
                     
-    valid_clippings = [c for c in valid_clippings if c["clipping_path"] not in processed_paths]
-    logger.info(f"Skipping {len(processed_paths)} already processed clippings. Remaining to process: {len(valid_clippings)}")
+    valid_clippings = [c for c in valid_clippings if Path(c["clipping_path"]).name not in processed_paths]
+    logger.info(f"Skipping already processed clippings. Remaining to process: {len(valid_clippings)}")
 
     successful_clippings = valid_clippings
     if not successful_clippings:
@@ -768,6 +768,16 @@ def main():
                     clippings = [json.loads(line.strip()) for line in f]
             else:
                 clippings = ingest_results
+                
+            if not clippings:
+                logger.info("ingestor_done.jsonl not found and no ingest results. Falling back to scanning clippings directory.")
+                clippings = []
+                for f in CLIPPINGS_DIR.glob("*.md"):
+                    clippings.append({
+                        "clipping_path": str(f.relative_to(PROJECT_DIR)),
+                        "status": "success",
+                        "domain_hint": "general"
+                    })
 
             if clippings:
                 note_results = phase_note_make(clippings, timeout=args.timeout)
