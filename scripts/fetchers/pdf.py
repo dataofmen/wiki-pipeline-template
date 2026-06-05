@@ -19,7 +19,7 @@ def fetch_pdf_via_marker(url: str, output_dir: Path = None) -> dict:
         from marker.models import create_model_dict
         from marker.output import text_from_rendered
     except ImportError:
-        return {"error": "marker-pdf not installed", "content": "", "title": "", "method": "failed"}
+        pass  # Fallback to pdfplumber/pymupdf below
 
     # Download PDF to temp file
     import tempfile as _tf
@@ -57,6 +57,13 @@ def fetch_pdf_via_marker(url: str, output_dir: Path = None) -> dict:
                             break
                     break
         if not title:
+            for line in text.splitlines():
+                line = line.strip()
+                if line and not line.startswith("<!--") and 5 < len(line) < 100 and "http" not in line and "copyright" not in line.lower() and "all rights reserved" not in line.lower():
+                    title = line
+                    break
+
+        if not title:
             title = urlparse(url).path.split("/")[-1].replace(".pdf", "").replace("-", " ").strip()
 
         # Save extracted images to clippings/images/ directory
@@ -86,8 +93,51 @@ def fetch_pdf_via_marker(url: str, output_dir: Path = None) -> dict:
             "domain_hint": "general",
         }
     except Exception as e:
-        return {"error": f"Marker conversion failed: {e}", "content": "", "title": "", "method": "failed"}
-    finally:
-        if os.path.exists(tmp):
-            os.unlink(tmp)
+        pass  # Fallback to other parsers
+        
+    # Fallback to pdfplumber or pymupdf
+    text = ""
+    title = ""
+    try:
+        import pdfplumber
+        with pdfplumber.open(tmp) as pdf:
+            title = pdf.metadata.get("Title", "")
+            pages = []
+            for i, page in enumerate(pdf.pages):
+                extracted = page.extract_text() or ""
+                pages.append(f"<!-- page {i+1} -->\n{extracted}")
+            text = "\n\n".join(pages)
+    except Exception:
+        try:
+            import fitz
+            doc = fitz.open(tmp)
+            title = doc.metadata.get("title", "")
+            pages = []
+            for i, page in enumerate(doc):
+                pages.append(f"<!-- page {i+1} -->\n{page.get_text()}")
+            text = "\n\n".join(pages)
+            doc.close()
+        except Exception as e:
+            return {"error": f"All PDF extractions failed: {e}", "content": "", "title": "", "method": "failed"}
+
+    # Smart title extraction if metadata is bad
+    if not title or title.lower().startswith("microsoft") or title.lower().startswith("untitled"):
+        for line in text.splitlines():
+            line = line.strip()
+            if line and not line.startswith("<!--") and 5 < len(line) < 100 and "http" not in line:
+                title = line
+                break
+
+    if not title:
+        title = urlparse(url).path.split("/")[-1].replace(".pdf", "").replace("-", " ").strip()
+
+    if os.path.exists(tmp):
+        os.unlink(tmp)
+
+    return {
+        "title": title,
+        "content": text,
+        "method": "pdfplumber/pymupdf",
+        "domain_hint": "general",
+    }
 
