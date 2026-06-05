@@ -127,7 +127,7 @@ def fetch_pdf_via_marker(url: str, output_dir: Path = None) -> dict:
     if not title or title.lower().startswith("microsoft") or title.lower().startswith("untitled"):
         for line in text.splitlines():
             line = line.strip()
-            if line and not line.startswith("<!--") and 5 < len(line) < 100 and "http" not in line:
+            if line and not line.startswith("<!--") and not line.startswith("![") and 5 < len(line) < 100 and "http" not in line:
                 title = line
                 break
 

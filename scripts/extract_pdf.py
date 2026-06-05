@@ -18,8 +18,8 @@ def slug_from_title(title: str) -> str:
 def _smart_title(content: str, fallback: str) -> str:
     for line in content.splitlines():
         line = line.strip()
-        # Ignore comments and very short lines
-        if line and not line.startswith("<!--") and len(line) > 5:
+        # Ignore comments, markdown images, and very short lines
+        if line and not line.startswith("<!--") and not line.startswith("![") and len(line) > 5:
             # If it looks like a reasonable title (not a url, not too long)
             if len(line) < 100 and "http" not in line:
                 return line
