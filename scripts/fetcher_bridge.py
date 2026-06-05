@@ -198,14 +198,13 @@ def _run_as_subprocess(url: str, output_dir: Path, source_type: str, python_bin:
         )
     except subprocess.TimeoutExpired:
         error_content = f"[추출 실패 — 타임아웃]\n원본: {url}"
-        path = format_clipping(url, urlparse(url).netloc, error_content, "failed",
-                               source_type or "url", "general", output_dir)
         return {
             "source_url": url,
-            "clipping_path": str(path),
+            "clipping_path": "",
             "status": "error",
             "domain_hint": "general",
             "fetch_method": "failed",
+            "error": error_content
         }
 
     # Parse JSON output from subprocess
@@ -239,14 +238,13 @@ def _run_as_subprocess(url: str, output_dir: Path, source_type: str, python_bin:
     # No useful output — error case
     error_detail = stderr[:500] if stderr else f"exit code {proc.returncode}"
     error_content = f"[추출 실패 — 수동 처리 필요]\n원본: {url}\n오류: {error_detail}"
-    path = format_clipping(url, urlparse(url).netloc, error_content, "failed",
-                           source_type or "url", "general", output_dir)
     return {
         "source_url": url,
-        "clipping_path": str(path),
+        "clipping_path": "",
         "status": "error",
         "domain_hint": "general",
         "fetch_method": "failed",
+        "error": error_content
     }
 
 
@@ -355,14 +353,13 @@ def fetch_and_save(url: str, output_dir: Path, source_type: str = "",
                 error_content = f"[추출 실패 — 수동 처리 필요]\n원본: {url}"
                 if result.get("error"):
                     error_content += f"\n오류: {result['error']}"
-                path = format_clipping(url, urlparse(url).netloc, error_content, "failed",
-                                       source_type, "general", output_dir)
                 return {
                     "source_url": url,
-                    "clipping_path": str(path),
+                    "clipping_path": "",
                     "status": "error",
                     "domain_hint": "general",
                     "fetch_method": "failed",
+                    "error": error_content
                 }
 
             title = result["title"]
@@ -381,14 +378,13 @@ def fetch_and_save(url: str, output_dir: Path, source_type: str = "",
             }
         except Exception as e:
             error_content = f"[추출 실패 — 수동 처리 필요]\n원본: {url}\n오류: {e}"
-            path = format_clipping(url, urlparse(url).netloc, error_content, "failed",
-                                   source_type, "general", output_dir)
             return {
                 "source_url": url,
-                "clipping_path": str(path),
+                "clipping_path": "",
                 "status": "error",
                 "domain_hint": "general",
                 "fetch_method": "failed",
+                "error": error_content
             }
 
     # ultimate-fetcher 직접 임포트 불가 → Readability.js 폴백 시도

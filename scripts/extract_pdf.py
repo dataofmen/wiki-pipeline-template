@@ -15,6 +15,17 @@ def slug_from_title(title: str) -> str:
     return "-".join(words)
 
 
+def _smart_title(content: str, fallback: str) -> str:
+    for line in content.splitlines():
+        line = line.strip()
+        # Ignore comments and very short lines
+        if line and not line.startswith("<!--") and len(line) > 5:
+            # If it looks like a reasonable title (not a url, not too long)
+            if len(line) < 100 and "http" not in line:
+                return line
+    return fallback
+
+
 def extract_with_pdfplumber(pdf_path: Path) :
     try:
         import pdfplumber
@@ -24,7 +35,10 @@ def extract_with_pdfplumber(pdf_path: Path) :
             for i, page in enumerate(pdf.pages):
                 text = page.extract_text() or ""
                 pages.append(f"<!-- page {i+1} -->\n{text}")
-            return title, "\n\n".join(pages)
+            content = "\n\n".join(pages)
+            if not title or title.lower().startswith("microsoft") or title.lower().startswith("untitled"):
+                title = _smart_title(content, title)
+            return title, content
     except Exception as e:
         print(f"pdfplumber 실패: {e}", file=sys.stderr)
     return None
@@ -39,7 +53,10 @@ def extract_with_pymupdf(pdf_path: Path) :
         for i, page in enumerate(doc):
             pages.append(f"<!-- page {i+1} -->\n{page.get_text()}")
         doc.close()
-        return title, "\n\n".join(pages)
+        content = "\n\n".join(pages)
+        if not title or title.lower().startswith("microsoft") or title.lower().startswith("untitled"):
+            title = _smart_title(content, title)
+        return title, content
     except Exception as e:
         print(f"pymupdf 실패: {e}", file=sys.stderr)
     return None
