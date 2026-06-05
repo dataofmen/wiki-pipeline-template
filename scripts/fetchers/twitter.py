@@ -83,7 +83,7 @@ def fetch_via_fxtwitter(url: str) -> dict:
     if author_name:
         title = f"{author_name} — {title}" if title else author_name
 
-    content = full_text + f"\n\n*원문: [{url}]({url})*"
+    content = full_text
     return {
         "title": title,
         "author": author_name,
