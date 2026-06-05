@@ -25,8 +25,11 @@ import os
 import shutil
 import subprocess
 import sys
+import re
+import time
 from datetime import datetime
 from pathlib import Path
+from openai import OpenAI
 
 PROJECT_DIR = Path(__file__).parent.parent
 INBOX_DIR = PROJECT_DIR / "inbox"
@@ -492,7 +495,7 @@ def _is_empty_clipping(path: str) -> bool:
 
 
 def phase_note_make(clippings: list[dict], timeout: int = 3600) -> list[dict]:
-    """Phase 4: Generate notes using Claude Code with session reuse."""
+    """Phase 4: Generate notes using OpenRouter (auto-routed free models)."""
     logger.info(f"=== Phase 4: Note Maker ({len(clippings)} clippings) ===")
 
     successful_clippings = [c for c in clippings if c.get("status") == "success" and c.get("clipping_path")]
@@ -523,96 +526,137 @@ def phase_note_make(clippings: list[dict], timeout: int = 3600) -> list[dict]:
         logger.warning("No successful clippings to process")
         return []
 
-    # Build focused prompt for note generation
-    clipping_list = "\n".join(
-        f"- {c['clipping_path']} (domain: {c.get('domain_hint', 'general')})"
-        for c in successful_clippings
+    api_key = os.environ.get("OPENROUTER_API_KEY") or _load_dotenv_value("OPENROUTER_API_KEY")
+    if not api_key:
+        logger.error("OPENROUTER_API_KEY environment variable is not set. Please set it to use the API pipeline.")
+        return [{"status": "error", "error": "OPENROUTER_API_KEY not set"}]
+
+    format_file = PROJECT_DIR / ".claude" / "skills" / "note-pipeline" / "references" / "note-format.md"
+    if not format_file.exists():
+        logger.error(f"Format rules file not found at {format_file}")
+        return [{"status": "error", "error": "format file not found"}]
+        
+    format_content = format_file.read_text(errors="ignore")
+    
+    client = OpenAI(
+        base_url="https://api.deepseek.com",
+        api_key="sk-9d9b0f2dfe3b42df8fdafb1017196fc2",
+        timeout=1800.0,
     )
+    # Use official DeepSeek API
+    model_name = "deepseek-reasoner"
 
-    prompt = f"""다음 clipping 파일들을 6 Rs 파이프라인으로 처리하라. note-pipeline 스킬과 note-format.md 참조 파일을 반드시 읽고 따른다.
+    results = []
 
-처리할 clipping 파일들:
-{clipping_list}
+    for idx, c in enumerate(successful_clippings):
+        clipping_path = c['clipping_path']
+        domain_hint = c.get('domain_hint', 'general')
+        logger.info(f"Processing clipping {idx+1}/{len(successful_clippings)}: {clipping_path}")
+
+        try:
+            clipping_content = Path(PROJECT_DIR / clipping_path).read_text(errors="ignore")
+        except Exception as e:
+            logger.error(f"Failed to read {clipping_path}: {e}")
+            continue
+
+        prompt = f"""다음 clipping 파일을 6 Rs 파이프라인으로 처리하고, 아래의 note-format.md 규칙을 엄격히 준수하여 위키 노트 1개와 가든 노트 1~3개를 마크다운으로 생성하라.
+**반드시 모든 본문 내용과 제목은 한국어(Korean)로 작성할 것.**
+
+[추론 및 통찰력 요구사항]
+단순 요약을 넘어, 표면적으로 드러나지 않은 숨겨진 의도, 비약적인 맥락 연결, 또는 전문가 수준의 날카로운 통찰력(Insight)을 반드시 도출하라. 
+<think> 태그 내에서 충분히 깊게 다각도로 고민한 뒤, 최종 결과물만 아래 포맷으로 출력하라.
+
+[절대 지켜야 할 파일 출력 포맷]
+각 노트는 반드시 아래 예시처럼 '경로 헤딩(####)' 아래에 '마크다운 블록(```markdown)'을 두는 구조로 출력해야 파서가 인식할 수 있다. 
+예시 포맷:
+#### `wiki/concepts/20260512-test-note.md`
+```markdown
+---
+title: 테스트 노트
+...
+```
+
+[note-format.md 규칙]
+{format_content}
+
+[처리할 clipping 파일]
+- 파일명: {Path(clipping_path).name}
+- 내용:
+{clipping_content}
 
 작업 순서:
-1. references/note-format.md 읽기
-2. 각 clipping에 대해 R1(Reduce) → R2(Reflect) → R3(Reweave) → R4(Record) → R5(Verify) 실행
-3. 각 clipping마다 wiki/ 노트 1개 + garden/ 노트 1~3개 생성
-4. wiki/concepts/ 또는 wiki/entities/ 에 저장 (type 기준)
-5. 관련 index.md 갱신
-6. log.md에 작업 기록
-7. 완료 목록을 _workspace/note_maker_done.jsonl에 작성
+1. 이 clipping에 대해 R1(Reduce) → R2(Reflect) → R3(Reweave) → R4(Record) → R5(Verify) 실행 (내부적으로 사고)
+2. 이 clipping을 기반으로 wiki/ 노트 1개 + garden/ 노트 1~3개를 생성
+3. **매우 중요**: 각 노트를 생성할 때, 다음과 같이 파일 경로를 명시하고 마크다운 코드 블록으로 감싸서 출력할 것.
+
+예시:
+`wiki/concepts/20260605-example-concept.md`
+```markdown
+---
+(프론트매터 내용)
+---
+(본문 내용)
+```
 
 **위키링크 규칙 (반드시 준수):**
 - 위키링크는 순수 슬러그만 사용: `[[슬러그]]` 형식
 - path-prefixed 위키링크 금지: `[[concepts/슬러그]]`, `[[entities/슬러그]]` 사용 금지
-- 올바른 예: `[[20260515-apple-accidental-moat]]`
-- 잘못된 예: `[[concepts/20260515-apple-accidental-moat]]`"""
+"""
 
-    # Resolve claude binary — launchd daemon PATH may omit user PATH entries
-    _claude_candidates = [
-        shutil.which("claude"),
-        "/Users/hmkwon/.local/bin/claude",
-        "/Applications/cmux.app/Contents/Resources/bin/claude",
-        "/opt/homebrew/bin/claude",
-        "/usr/local/bin/claude",
-    ]
-    claude_bin = next((c for c in _claude_candidates if c and Path(c).exists()), None)
-    if not claude_bin:
-        logger.error("Claude CLI not found in any known location")
-        return [{"status": "error", "error": "claude CLI not found"}]
-    cmd = [
-        claude_bin,
-        "-p", prompt,
-        "--continue",
-        "--fork-session",
-        "--allowedTools", "Edit,Write,Bash,Read,Agent",
-    ]
+        logger.info(f"Invoking OpenRouter ({model_name}) for {Path(clipping_path).name}...")
+        try:
+            completion = client.chat.completions.create(
+                model=model_name,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.3,
+                timeout=1800, # 30 minutes timeout for API call (for large local models)
+            )
+            response_text = completion.choices[0].message.content
+            
+            # Parse the response and save files (robust regex for Qwen outputs)
+            pattern = re.compile(r'(?:#+\s*)?(?:`|\*\*|\[)?(wiki/[^\s`\*\[\]]+?\.md|garden/[^\s`\*\[\]]+?\.md)(?:`|\*\*|\])?\s*```(?:markdown)?\n(.*?)\n```', re.DOTALL)
+            matches = pattern.findall(response_text)
+            
+            saved_files = []
+            for file_path_str, content in matches:
+                full_path = PROJECT_DIR / file_path_str.strip()
+                full_path.parent.mkdir(parents=True, exist_ok=True)
+                full_path.write_text(content.strip() + "\n")
+                saved_files.append(file_path_str.strip())
+                logger.info(f"  -> Saved {file_path_str.strip()}")
+                
+            if not saved_files:
+                logger.warning(f"No valid markdown blocks parsed from the response for {clipping_path}")
+                # Fallback logging if parsing fails
+                failed_log = WORKSPACE_DIR / f"failed_parse_{Path(clipping_path).stem}.md"
+                failed_log.write_text(response_text)
+                logger.warning(f"Saved raw response to {failed_log}")
+                
+            # Log success
+            results.append({
+                "clipping_path": str(clipping_path),
+                "generated_files": saved_files,
+                "status": "success"
+            })
+            
+            # Append to note_maker_done.jsonl
+            with open(note_maker_done, "a") as f:
+                f.write(json.dumps({"clipping_path": str(clipping_path), "status": "success", "generated_files": saved_files}) + "\n")
+                
+        except Exception as e:
+            logger.error(f"OpenRouter API failed for {clipping_path}: {e}")
+            results.append({
+                "clipping_path": str(clipping_path),
+                "status": "error",
+                "error": str(e)
+            })
 
-    logger.info("Invoking Claude Code for note generation...")
-    try:
-        result = subprocess.run(
-            cmd,
-            cwd=str(PROJECT_DIR),
-            capture_output=True,
-            text=True,
-            timeout=timeout,  # user-specified timeout
-        )
-        logger.info(f"Claude Code exited with code {result.returncode}")
-        if result.stdout:
-            logger.info(f"Claude output (first 500 chars): {result.stdout[:500]}")
-        if result.stderr:
-            logger.warning(f"Claude stderr (first 500 chars): {result.stderr[:500]}")
-    except subprocess.TimeoutExpired:
-        logger.error(f"Claude Code timed out after {timeout} seconds")
-        return [{"status": "error", "error": "timeout"}]
-    except FileNotFoundError:
-        logger.error("Claude Code CLI not found. Install with: npm install -g @anthropic-ai/claude-code")
-        return [{"status": "error", "error": "claude CLI not found"}]
+        # Respect rate limits for free models
+        if idx < len(successful_clippings) - 1:
+            logger.info("Waiting 10 seconds before next clipping to respect OpenRouter rate limits...")
+            time.sleep(10)
 
-    # Check results by scanning for new files
-    results = []
-    note_maker_done = WORKSPACE_DIR / "note_maker_done.jsonl"
-    if note_maker_done.exists():
-        with open(note_maker_done) as f:
-            for line in f:
-                results.append(json.loads(line.strip()))
-        logger.info(f"Note maker completed: {len(results)} notes")
-    else:
-        # Fallback: scan for recently created files
-        logger.warning("note_maker_done.jsonl not found, scanning for recent files")
-        now = datetime.now()
-        for pattern_dir in [WIKI_DIR / "concepts", WIKI_DIR / "entities", GARDEN_DIR]:
-            if pattern_dir.exists():
-                for f in pattern_dir.glob("*.md"):
-                    mtime = datetime.fromtimestamp(f.stat().st_mtime)
-                    if (now - mtime).total_seconds() < 600:  # Created in last 10 min
-                        results.append({
-                            "path": str(f.relative_to(PROJECT_DIR)),
-                            "status": "created",
-                        })
-        logger.info(f"Found {len(results)} recently created notes")
-
+    logger.info(f"Note maker completed: processed {len(results)} clippings.")
     return results
 
 

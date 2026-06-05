@@ -9,6 +9,12 @@ if [ ! -d "$QUARTZ_CONTENT" ]; then
   exit 1
 fi
 
+echo "YAML 프론트매터 타이틀 수정 중..."
+python3 "$WIKI_ROOT/scripts/fix_yaml_titles.py"
+
+echo "노트 디렉토리 위치 보정 중..."
+python3 "$WIKI_ROOT/scripts/fix_paths.py"
+
 for folder in wiki garden clippings; do
   rsync -av --delete "$WIKI_ROOT/$folder/" "$QUARTZ_CONTENT/$folder/"
 done
