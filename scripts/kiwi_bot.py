@@ -20,11 +20,12 @@ ALLOWED_USERS = set(
 INBOX_DIR = Path(os.environ.get("INBOX_DIR", Path(__file__).parent.parent / "inbox"))
 WORKSPACE = INBOX_DIR.parent / "_workspace"
 
-logging.basicConfig(
-    filename=Path(__file__).parent / "kiwi_bot.log",
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(message)s",
-)
+from logging.handlers import RotatingFileHandler
+
+log_path = Path(__file__).parent / "kiwi_bot.log"
+log_handler = RotatingFileHandler(log_path, maxBytes=10*1024*1024, backupCount=5)
+log_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+logging.basicConfig(level=logging.INFO, handlers=[log_handler])
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
@@ -96,7 +97,7 @@ def save_raw_text(text: str, sender: str) -> Path:
 def append_workspace_log(file_path: Path, content_type: str) :
     WORKSPACE.mkdir(exist_ok=True)
     log_path = WORKSPACE / "kiwi_new_files.jsonl"
-    entry = {"path": str(file_path), "type": content_type, "received_at": datetime.now().isoformat()}
+    entry = {"inbox_path": str(file_path.relative_to(INBOX_DIR.parent)), "type": content_type, "status": "pending", "received_at": datetime.now().isoformat()}
     with open(log_path, "a") as f:
         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 

@@ -20,6 +20,7 @@ Usage:
 import argparse
 import json
 import logging
+from logging.handlers import RotatingFileHandler
 import os
 import shutil
 import subprocess
@@ -39,7 +40,7 @@ SCRIPTS_DIR = PROJECT_DIR / "scripts"
 LOG_FILE = SCRIPTS_DIR / "pipeline.log"
 LOCK_FILE = SCRIPTS_DIR / ".pipeline.lock"
 VENV_PYTHON = str(PROJECT_DIR / ".venv" / "bin" / "python3")
-UF_VENV_PYTHON = str(Path("/Users/hmkwon/Projects/ultimate-fetcher/.venv/bin/python3"))
+UF_VENV_PYTHON = str(Path.home() / "Projects" / "ultimate-fetcher" / ".venv" / "bin" / "python3")
 
 # Try importing ultimate-fetcher bridge; falls back to subprocess via UF venv Python
 # fetch_and_save() handles both cases: direct import if available, subprocess otherwise
@@ -51,10 +52,11 @@ except ImportError:
     USE_ULTIMATE_FETCHER = False
     _fetch_and_save = None
 
+log_handler = RotatingFileHandler(LOG_FILE, maxBytes=10*1024*1024, backupCount=5)
+log_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
 logging.basicConfig(
-    filename=LOG_FILE,
     level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[log_handler],
 )
 logger = logging.getLogger(__name__)
 
@@ -241,7 +243,9 @@ def scan_inbox() -> list[dict]:
             for line in f:
                 entry = json.loads(line.strip())
                 if entry.get("status") in ("pending", "processing"):
-                    inbox_path = PROJECT_DIR / entry["inbox_path"]
+                    raw_path = entry.get("inbox_path") or entry.get("path") or entry.get("file_path")
+                    if not raw_path: continue
+                    inbox_path = PROJECT_DIR / raw_path
                     if inbox_path.exists():
                         source_url = entry.get("source_url", "")
                         if source_url and _normalize_url(source_url) in already_clipped:
@@ -285,7 +289,10 @@ def scan_inbox() -> list[dict]:
         # Also handle direct file drops (not .md, like .pdf or .txt files)
         if subdir == "texts":
             for f in dir_path.glob("*.txt"):
-                meta_path = f.parent / f"{f.stem}.meta.yaml"
+                # meta file may be named either {stem}.meta.yaml or {name}.meta.yaml
+                meta_path = f.parent / f"{f.name}.meta.yaml"
+                if not meta_path.exists():
+                    meta_path = f.parent / f"{f.stem}.meta.yaml"
                 if not any(p.get("inbox_path", "").endswith(f.name) for p in pending):
                     source_url, title = "", f.stem.replace("_", " ")
                     if meta_path.exists():
@@ -343,11 +350,21 @@ def phase_ingest(pending: list[dict]) -> list[dict]:
                 content = Path(inbox_path).read_text(errors="ignore").strip()
                 title = item.get("title") or Path(inbox_path).stem.replace("_", " ")
                 domain_hint = detect_domain_hint(source_url or "", title, content)
+                # Skip first line if it's a URL (already captured as source_url)
+                lines = content.splitlines()
+                if lines and lines[0].strip().startswith("http"):
+                    content = "\n".join(lines[1:]).strip()
+
                 clipping_path = format_clipping(
                     source_url or inbox_path, title, content,
                     "text-file", "text", domain_hint, CLIPPINGS_DIR,
                 )
-                _mark_inbox_processed(inbox_path)
+                # .txt files: mark the companion .meta.yaml as processed
+                meta_path = Path(inbox_path).with_name(Path(inbox_path).name + ".meta.yaml")
+                if meta_path.exists():
+                    _mark_inbox_processed(str(meta_path))
+                else:
+                    _mark_inbox_processed(inbox_path)
                 results.append({
                     "source_url": source_url or inbox_path,
                     "clipping_path": str(clipping_path),
@@ -474,7 +491,7 @@ def _is_empty_clipping(path: str) -> bool:
         return True
 
 
-def phase_note_make(clippings: list[dict]) -> list[dict]:
+def phase_note_make(clippings: list[dict], timeout: int = 600) -> list[dict]:
     """Phase 4: Generate notes using Claude Code with session reuse."""
     logger.info(f"=== Phase 4: Note Maker ({len(clippings)} clippings) ===")
 
@@ -542,7 +559,7 @@ def phase_note_make(clippings: list[dict]) -> list[dict]:
             cwd=str(PROJECT_DIR),
             capture_output=True,
             text=True,
-            timeout=600,  # 10 minute timeout
+            timeout=timeout,  # user-specified timeout
         )
         logger.info(f"Claude Code exited with code {result.returncode}")
         if result.stdout:
@@ -550,7 +567,7 @@ def phase_note_make(clippings: list[dict]) -> list[dict]:
         if result.stderr:
             logger.warning(f"Claude stderr (first 500 chars): {result.stderr[:500]}")
     except subprocess.TimeoutExpired:
-        logger.error("Claude Code timed out after 600 seconds")
+        logger.error(f"Claude Code timed out after {timeout} seconds")
         return [{"status": "error", "error": "timeout"}]
     except FileNotFoundError:
         logger.error("Claude Code CLI not found. Install with: npm install -g @anthropic-ai/claude-code")
@@ -615,9 +632,8 @@ def phase_publish() -> bool:
     # Step 4: Build and deploy
     logger.info("Building and deploying Quartz site...")
     # Daemon PATH omits /opt/homebrew/bin — inject it explicitly so npx can find node
-    import os as _os
     brew_bin = "/opt/homebrew/bin"
-    node_env = _os.environ.copy()
+    node_env = os.environ.copy()
     node_env["PATH"] = f"{brew_bin}:{node_env.get('PATH', '/usr/bin:/bin')}"
     npx = shutil.which("npx", path=node_env["PATH"]) or f"{brew_bin}/npx"
     deploy_result = run_cmd(
@@ -673,7 +689,6 @@ def phase_report(ingest_results: list, note_results: list, publish_success):
     # Rotate workspace
     workspace_prev = PROJECT_DIR / "_workspace_prev"
     if workspace_prev.exists():
-        import shutil
         shutil.rmtree(workspace_prev)
     WORKSPACE_DIR.rename(workspace_prev)
     WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
@@ -692,6 +707,8 @@ def main():
                         help="Phase(s) to run: 3, 4, 5, 6, or range like 3-5 (default: 3-6)")
     parser.add_argument("--dry-run", action="store_true",
                         help="Show what would be done without executing")
+    parser.add_argument("--timeout", type=int, default=600,
+                        help="Timeout in seconds for Phase 4 Claude Code (default: 600)")
     args = parser.parse_args()
 
     # Parse phase range
@@ -736,7 +753,7 @@ def main():
                 clippings = ingest_results
 
             if clippings:
-                note_results = phase_note_make(clippings)
+                note_results = phase_note_make(clippings, timeout=args.timeout)
             else:
                 logger.warning("No clippings to process for note generation")
 

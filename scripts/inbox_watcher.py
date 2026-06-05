@@ -23,11 +23,12 @@ if not Path(VENV_PYTHON).exists():
     if ALT_PYTHON.exists():
         VENV_PYTHON = str(ALT_PYTHON)
 
-logging.basicConfig(
-    filename=Path(__file__).parent / "watcher.log",
-    level=logging.INFO,
-    format="%(asctime)s %(message)s",
-)
+from logging.handlers import RotatingFileHandler
+
+log_path = Path(__file__).parent / "watcher.log"
+log_handler = RotatingFileHandler(log_path, maxBytes=10*1024*1024, backupCount=5)
+log_handler.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
+logging.basicConfig(level=logging.INFO, handlers=[log_handler])
 
 DEBOUNCE_SECONDS = 30  # 파일 추가 후 30초 대기 후 파이프라인 실행
 
@@ -72,8 +73,8 @@ def main():
     handler = InboxHandler()
 
     # 시작 시 기존 pending 파일 확인
-    existing = list(INBOX_DIR.rglob("*.md")) + list(INBOX_DIR.rglob("*.pdf"))
-    pending = [f for f in existing if "status: pending" in f.read_text(errors="ignore")]
+    existing = list(INBOX_DIR.rglob("*.md")) + list(INBOX_DIR.rglob("*.yaml"))
+    pending = [f for f in existing if f.suffix in (".md", ".yaml") and "status: pending" in f.read_text(errors="ignore")]
     if pending:
         logging.info(f"기존 pending 파일 {len(pending)}개 감지 — 파이프라인 트리거 예약")
         handler._pending = True

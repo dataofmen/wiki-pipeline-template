@@ -1,25 +1,17 @@
 #!/bin/bash
-# wiki -> Quartz content synchronization
-# Templated version — customize paths and folders as needed
+# wiki → Quartz content 동기화
 set -e
 WIKI_ROOT="$(dirname "$0")/.."
 QUARTZ_CONTENT="$WIKI_ROOT/quartz/content"
 
 if [ ! -d "$QUARTZ_CONTENT" ]; then
-  echo "Quartz not installed. Run 'npx quartz create' first."
+  echo "Quartz 미설치. 먼저 quartz 폴더를 설정하세요."
   exit 1
 fi
 
 for folder in wiki garden clippings; do
-  if [ -d "$WIKI_ROOT/$folder" ]; then
-    rsync -av --delete "$WIKI_ROOT/$folder/" "$QUARTZ_CONTENT/$folder/"
-  else
-    echo "Warning: $WIKI_ROOT/$folder not found, skipping."
-  fi
+  rsync -av --delete "$WIKI_ROOT/$folder/" "$QUARTZ_CONTENT/$folder/"
 done
 
-if [ -f "$WIKI_ROOT/index.md" ]; then
-  cp "$WIKI_ROOT/index.md" "$QUARTZ_CONTENT/index.md"
-fi
-
-echo "Sync completed: $(date)"
+cp "$WIKI_ROOT/index.md" "$QUARTZ_CONTENT/index.md"
+echo "동기화 완료: $(date)"

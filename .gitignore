@@ -50,4 +50,4 @@ log.md
 .omc/
 
 # Claude
-.claude/settings.local.json
+.claude/settings.local.jsonscripts/*.lock

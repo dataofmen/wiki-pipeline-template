@@ -32,537 +32,50 @@ from pathlib import Path
 from urllib.parse import urlparse, unquote
 from urllib.request import urlopen
 
+from fetchers.youtube import fetch_youtube_transcript, is_youtube_video_url
+from fetchers.pdf import fetch_pdf_via_marker, is_pdf_url
+from fetchers.twitter import fetch_via_fxtwitter, is_twitter_url
+from fetchers.readability import fetch_via_readability_js
+from fetchers.utils import format_clipping, determine_source_type, _normalize_url_for_dedup, find_existing_clipping
+
 # yt-dlp binary (search PATH then common Homebrew location)
 YT_DLP = shutil.which("yt-dlp") or "/opt/homebrew/bin/yt-dlp"
 
 
-def is_pdf_url(url: str) -> bool:
-    """Check if URL points to a PDF file."""
-    path = urlparse(url).path.lower()
-    if path.endswith(".pdf"):
-        return True
-    # Some URLs serve PDF without .pdf extension but with content-type
-    return False
-
-
-def _yaml_dump(data: dict) -> str:
-    """Minimal YAML serializer for frontmatter dicts (no pyyaml dependency)."""
-    lines = []
-    for key, value in data.items():
-        if isinstance(value, list):
-            if value:
-                lines.append(f"{key}:")
-                for item in value:
-                    lines.append(f"  - {item}")
-            else:
-                lines.append(f"{key}: []")
-        elif isinstance(value, int):
-            lines.append(f"{key}: {value}")
-        elif isinstance(value, str):
-            # Quote strings with YAML-special chars or leading/trailing whitespace
-            needs_quote = any(c in value for c in [':', '#', '[', ']', '{', '}', '&', '*', '!', '|', '>']) or \
-                          value.startswith(("'", '"', '-', '?', '@', '`')) or not value
-            if needs_quote:
-                escaped = value.replace('"', '\\"')
-                lines.append(f'{key}: "{escaped}"')
-            else:
-                lines.append(f"{key}: {value}")
-        else:
-            lines.append(f"{key}: {value}")
-    return "\n".join(lines)
-
-UF_VENV_PYTHON = str(Path("/Users/hmkwon/Projects/ultimate-fetcher/.venv/bin/python3"))
-
-
-def detect_domain_hint(url: str, title: str, content: str) -> str:
-    text = f"{url} {title} {content[:500]}".lower()
-    if any(k in text for k in ["trading", "invest", "stock", "crypto", "quant", "backtest", "sharpe"]):
-        return "trading"
-    if any(k in text for k in ["ux", "hci", "usability", "user research", "product", "design", "figma"]):
-        return "ux"
-    if any(k in text for k in ["note", "knowledge", "pkm", "zettelkasten", "philosophy", "essay", "thinking"]):
-        return "pkm"
-    return "general"
-
-
-def slug_from_title_and_url(title: str, url: str) -> str:
-    """Generate an ASCII slug from title, falling back to URL-based unique ID."""
-    # Try title-based slug — keep only ASCII word chars after NFKD
-    import unicodedata as _ud
-    normalized = _ud.normalize("NFKD", title.lower())
-    ascii_title = "".join(c for c in normalized if ord(c) < 128 and not _ud.combining(c))
-    clean = re.sub(r"[^\w\s-]", "", ascii_title).strip()
-    if len(clean) > 5:
-        words = clean.split()[:5]
-        return "-".join(words)
-
-    # For YouTube, use video ID
-    yt_match = re.search(r"[?&]v=([A-Za-z0-9_-]+)", url) or re.search(r"youtu\.be/([A-Za-z0-9_-]+)", url)
-    if yt_match:
-        return f"yt-{yt_match.group(1)}"
-
-    # For X.com/Twitter threads, extract tweet ID from URL
-    twitter_match = re.search(r"/status/(\d+)", url)
-    if twitter_match:
-        return f"thread-{twitter_match.group(1)}"
-
-    # For other URLs with path segments, use last path part
-    path = urlparse(url).path.strip("/")
-    if path:
-        last_segment = path.split("/")[-1]
-        clean_segment = re.sub(r"[^\w-]", "", last_segment)[:60]
-        if len(clean_segment) > 3:
-            return clean_segment
-
-    return "untitled"
-
-
-def is_twitter_url(url: str) -> bool:
-    domain = urlparse(url).netloc.lower()
-    return "twitter.com" in domain or "x.com" in domain
-
-
-def is_youtube_url(url: str) -> bool:
-    domain = urlparse(url).netloc.lower()
-    return "youtube.com" in domain or "youtu.be" in domain
-
-
-def is_youtube_video_url(url: str) -> bool:
-    """Returns True only for actual video URLs (not community posts, channels, etc.)."""
-    if not is_youtube_url(url):
-        return False
-    path = urlparse(url).path
-    # Exclude community posts (/post/...), channels, playlists, etc.
-    if re.search(r"/post/|/@|/channel/|/c/|/user/|/playlist", path):
-        return False
-    return bool(re.search(r"[?&]v=", url) or "youtu.be/" in url)
-
 
-def fetch_via_fxtwitter(url: str) -> dict:
-    """X.com/Twitter 전용: api.fxtwitter.com으로 tweet 본문 추출.
-
-    ultimate-fetcher 없이도 X.com 로그인 장벽을 우회한다.
-    """
-    tweet_match = re.search(r"/status/(\d+)", url)
-    if not tweet_match:
-        return {}
-    tweet_id = tweet_match.group(1)
-    api_url = f"https://api.fxtwitter.com/status/{tweet_id}"
-    try:
-        req = __import__("urllib.request", fromlist=["urlopen"]).urlopen(api_url, timeout=15)
-        data = json.loads(req.read().decode("utf-8"))
-    except Exception as e:
-        print(f"fxtwitter API 실패: {e}", file=sys.stderr)
-        return {}
-
-    tweet = data.get("tweet", {})
-    if not tweet:
-        return {}
-
-    author_name = tweet.get("author", {}).get("name", "")
-    author_screen = tweet.get("author", {}).get("screen_name", "")
-    text = tweet.get("text", "")
-    replies = tweet.get("replies") or []
-    article = tweet.get("article") or {}
-
-    # X Article (Note Tweet): text 비어 있고 article.content.blocks 있는 경우
-    if not text and article:
-        article_title = article.get("title", "")
-        blocks = article.get("content", {}).get("blocks", [])
-        article_lines = []
-        if article_title:
-            article_lines.append(f"# {article_title}")
-        for block in blocks:
-            block_text = block.get("text", "").strip()
-            if block_text:
-                article_lines.append(block_text)
-        text = "\n\n".join(article_lines)
-
-    # thread 필드가 list인 경우 스레드 본문 조합, 아니면 단일 트윗
-    parts = [text]
-    if isinstance(replies, list):
-        for r in replies:
-            r_text = r.get("text", "")
-            if r_text and r_text != text:
-                parts.append(r_text)
-    elif isinstance(tweet.get("thread"), list):
-        for r in tweet["thread"]:
-            r_text = r.get("text", "")
-            if r_text and r_text != text:
-                parts.append(r_text)
-    full_text = "\n\n".join(p for p in parts if p).strip()
-
-    if not full_text:
-        return {}
-
-    # 제목: 첫 비-URL 줄 최대 80자
-    title = ""
-    for line in full_text.splitlines():
-        s = line.strip().lstrip("#")
-        if s and not s.startswith("http"):
-            title = s[:80].rstrip()
-            if len(s) > 80:
-                title += "…"
-            break
-    if author_name:
-        title = f"{author_name} — {title}" if title else author_name
-
-    content = full_text + f"\n\n*원문: [{url}]({url})*"
-    return {
-        "title": title,
-        "author": author_name,
-        "author_screen": author_screen,
-        "content": content,
-        "method": "fxtwitter",
-        "domain_hint": "general",
-    }
-
-
-def _vtt_to_text(vtt_content: str) -> str:
-    """Convert VTT subtitle content to clean, deduplicated transcript text."""
-    lines = []
-    seen: set[str] = set()
-    for line in vtt_content.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        if line.startswith("WEBVTT") or line.startswith("Kind:") or line.startswith("Language:"):
-            continue
-        if re.match(r"\d{2}:\d{2}:\d{2}", line) or re.match(r"^\d+$", line):
-            continue
-        clean = re.sub(r"<[^>]+>", "", line).strip()
-        clean = re.sub(r"&gt;", ">", clean)
-        if not clean or clean in seen:
-            continue
-        seen.add(clean)
-        lines.append(clean)
-    return "\n".join(lines)
-
-
-def fetch_pdf_via_marker(url: str, output_dir: Path = None) -> dict:
-    """Download PDF and convert to markdown using Marker (preserves tables, images, equations)."""
-    try:
-        from marker.converters.pdf import PdfConverter
-        from marker.models import create_model_dict
-        from marker.output import text_from_rendered
-    except ImportError:
-        return {"error": "marker-pdf not installed", "content": "", "title": "", "method": "failed"}
-
-    # Download PDF to temp file
-    tmp = tempfile.mktemp(suffix=".pdf")
-    try:
-        resp = urlopen(url, timeout=60)
-        with open(tmp, "wb") as f:
-            f.write(resp.read())
-    except Exception as e:
-        return {"error": f"PDF download failed: {e}", "content": "", "title": "", "method": "failed"}
-
-    try:
-        converter = PdfConverter(artifact_dict=create_model_dict())
-        rendered = converter(tmp)
-        text, metadata, images = text_from_rendered(rendered)
-
-        # Extract title from content: first meaningful heading
-        title = ""
-        for line in text.splitlines():
-            stripped = line.lstrip("# ").strip()
-            if stripped and len(stripped) > 5 and not stripped.lower().startswith("chapter"):
-                title = stripped
-                break
-        # Fallback: combine "Chapter" heading with next real title
-        if not title:
-            lines = text.splitlines()
-            for i, line in enumerate(lines):
-                if line.strip().startswith("#") and "Chapter" in line:
-                    for j in range(i + 1, min(i + 5, len(lines))):
-                        candidate = lines[j].strip()
-                        if candidate and len(candidate) > 3 and not candidate.startswith("#"):
-                            title = candidate
-                            break
-                    break
-        if not title:
-            title = urlparse(url).path.split("/")[-1].replace(".pdf", "").replace("-", " ").strip()
-
-        # Save extracted images to clippings/images/ directory
-        if images and output_dir:
-            img_dir = output_dir / "images"
-            img_dir.mkdir(parents=True, exist_ok=True)
-            date_prefix = datetime.now().strftime("%Y%m%d")
-            for img_name, img_data in images.items():
-                safe_name = re.sub(r'[^\w.]', '_', img_name)
-                if not safe_name.startswith(date_prefix):
-                    safe_name = f"{date_prefix}-{safe_name}"
-                img_path = img_dir / safe_name
-                try:
-                    if hasattr(img_data, 'save'):
-                        img_data.save(str(img_path))
-                    elif isinstance(img_data, bytes):
-                        with open(img_path, 'wb') as f:
-                            f.write(img_data)
-                    text = text.replace(img_name, f"images/{safe_name}")
-                except Exception as e:
-                    print(f"Warning: could not save image {img_name}: {e}")
-
-        return {
-            "title": title,
-            "content": text,
-            "method": "marker",
-            "domain_hint": "general",
-        }
-    except Exception as e:
-        return {"error": f"Marker conversion failed: {e}", "content": "", "title": "", "method": "failed"}
-    finally:
-        if os.path.exists(tmp):
-            os.unlink(tmp)
-
-
-def fetch_youtube_transcript(url: str) -> dict:
-    """Fetch YouTube video info + transcript via yt-dlp. Returns title/content dict."""
-    if not Path(YT_DLP).exists():
-        return {"error": f"yt-dlp not found at {YT_DLP}", "content": "", "title": ""}
-
-    with tempfile.TemporaryDirectory() as tmpdir:
-        out_tmpl = os.path.join(tmpdir, "%(id)s")
-
-        # Step 1: Get metadata as JSON
-        meta_cmd = [
-            YT_DLP, "--dump-json", "--no-playlist",
-            "--quiet", "--no-warnings", url,
-        ]
-        meta_proc = subprocess.run(meta_cmd, capture_output=True, text=True, timeout=60)
-        title = urlparse(url).netloc
-        duration_str = ""
-        channel = ""
-        if meta_proc.returncode == 0 and meta_proc.stdout.strip():
-            try:
-                meta = json.loads(meta_proc.stdout.strip())
-                title = meta.get("title", title)
-                channel = meta.get("channel", meta.get("uploader", ""))
-                secs = meta.get("duration", 0)
-                duration_str = f"{secs // 60}분 {secs % 60}초" if secs else ""
-            except json.JSONDecodeError:
-                pass
-
-        # Step 2: Download Korean subtitles (auto-generated), fallback to English
-        for lang in ("ko", "en"):
-            sub_cmd = [
-                YT_DLP,
-                "--write-auto-subs", "--sub-langs", lang,
-                "--sub-format", "vtt",
-                "--skip-download", "--no-playlist",
-                "--quiet", "--no-warnings",
-                "-o", out_tmpl, url,
-            ]
-            subprocess.run(sub_cmd, capture_output=True, timeout=120)
-            # Find downloaded .vtt file
-            vtt_files = list(Path(tmpdir).glob(f"*.{lang}.vtt"))
-            if vtt_files:
-                vtt_text = _vtt_to_text(vtt_files[0].read_text(encoding="utf-8", errors="replace"))
-                if len(vtt_text) > 100:
-                    header = f"**채널**: {channel}" if channel else ""
-                    if duration_str:
-                        header += f" | **길이**: {duration_str}" if header else f"**길이**: {duration_str}"
-                    content = f"{header}\n\n{vtt_text}" if header else vtt_text
-                    return {
-                        "title": title,
-                        "content": content,
-                        "method": "yt-dlp-transcript",
-                        "url": url,
-                        "domain_hint": detect_domain_hint(url, title, vtt_text),
-                    }
-
-    return {
-        "error": "자막 없음 — 자막이 제공되지 않는 영상",
-        "title": title,
-        "content": f"[자막 없음]\n채널: {channel}\n원본: {url}",
-        "method": "yt-dlp-no-subs",
-        "url": url,
-        "domain_hint": "general",
-    }
-
-
-def is_reddit_url(url: str) -> bool:
-    return "reddit.com" in urlparse(url).netloc.lower()
-
-
-def is_linkedin_url(url: str) -> bool:
-    return "linkedin.com" in urlparse(url).netloc.lower()
-
-
-def _clean_linkedin_content(content: str) -> str:
-    """Strip LinkedIn navigation noise, keeping only the post body text and article link."""
-    from urllib.parse import parse_qs, urlparse as _up
-
-    def _unwrap_redir(href: str) -> str:
-        """Unwrap linkedin.com/redir/redirect?url=... → actual URL."""
-        if "linkedin.com/redir/redirect" in href:
-            try:
-                qs = parse_qs(_up(href).query)
-                return unquote(qs.get("url", [href])[0])
-            except Exception:
-                pass
-        return href
-
-    # Step 1: globally replace all LinkedIn redirect URLs before per-line processing
-    def _replace_redir_url(m):
-        return _unwrap_redir(m.group(0))
-    content = re.sub(
-        r'https://(?:www\.)?linkedin\.com/redir/redirect\?url=[^\s\)"\']+',
-        _replace_redir_url, content
-    )
-
-    # Step 2: strip title attributes: (url "title") → (url)
-    content = re.sub(r'\(([^\s\)]+)\s+"[^"]*"\)', r'(\1)', content)
-
-    # Step 3: convert article preview images [![alt]()](url) → [alt](url)
-    # Also strip nested brackets from alt text to avoid wikilink conflicts
-    def _fix_preview(m):
-        alt = re.sub(r'[\[\]]', '', m.group(1)).strip()  # remove [ ] from alt text
-        return f"[{alt}]({m.group(2)})" if alt else ""
-    content = re.sub(
-        r'\[!\[([^\]]*(?:\[[^\]]*\][^\]]*)*)\]\([^\)]*\)\]\(([^\)]+)\)',
-        _fix_preview,
-        content
-    )
-    # Step 4: remove dangling image/noise lines like `![` with no closing `]()`
-    content = re.sub(r'^!\[$', '', content, flags=re.MULTILINE)
-
-    stop_keywords = (
-        "trk=public_post_like-cta",
-        "trk=public_post_comment-cta",
-        "trk=public_post_social-actions",
-        "trk=public_post_reshare-cta",
-    )
-
-    lines_out = []
-    for line in content.splitlines():
-        stripped = line.strip()
-
-        # Truncate at engagement bar (Like / Comment / Share CTAs)
-        if any(kw in stripped for kw in stop_keywords):
-            break
-
-        # Skip navigation / UI noise lines
-        if any(pat in stripped for pat in (
-            "Report this post", "Report this comment",
-            "trk=public_post_feed-actor",
-            "/uas/login?session_redirect",
-        )):
-            continue
-        if re.match(r'^\* \[', stripped) and "/uas/login" in stripped:
-            continue
-        if re.match(r'^\d+[hdw]$', stripped):  # "23h", "2d", "1w"
-            continue
-        # Bare `!` lines or empty images
-        if re.match(r'^!+$', stripped) or re.match(r'^!\[[\s!]*\]\(\s*\)$', stripped):
-            continue
-        # LinkedIn signup links for hashtags → plain text
-        line = re.sub(
-            r'\[([^\]]+)\]\(https://[^\s\)]*linkedin\.com/signup[^\)]*\)',
-            lambda m: m.group(1) if m.group(1).startswith("#") else m.group(0),
-            line
-        )
-
-        lines_out.append(line)
-
-    joined = "\n".join(lines_out)
-    # Collapse 3+ blank lines to 2
-    joined = re.sub(r'\n{3,}', '\n\n', joined)
-    # Ensure paragraph breaks: insert blank line between any two adjacent non-empty lines
-    result_lines = joined.split('\n')
-    final_lines = []
-    for i, line in enumerate(result_lines):
-        final_lines.append(line)
-        if line.strip() and i + 1 < len(result_lines) and result_lines[i + 1].strip():
-            final_lines.append('')
-    return '\n'.join(final_lines).strip()
-
-
-def _clean_x_content(content: str) -> str:
-    """Strip X.com/Twitter boilerplate: login wall, JS warnings, nav chrome."""
-    x_noise_patterns = [
-        r"^# JavaScript is not available\.",
-        r"^We['']ve detected that JavaScript is disabled",
-        r"^\[Help Center\]",
-        r"^\[Terms of Service\]",
-        r"^\[Privacy Policy\]",
-        r"^\[Cookie Policy\]",
-        r"^\[Imprint\]",
-        r"^\[Ads info\]",
-        r"^© \d{4} X Corp\.",
-        r"^Don't miss what's happening\.",
-        r"^People on X are the first to know\.",
-        r"^\[Log in\]",
-        r"^\[Sign up\]",
-        r"^See new posts$",
-        r"^# $",  # empty heading
-        r"^\[!\[Image \d+\]\(https://pbs\.twimg\.com/profile_images",
-    ]
-    stop_markers = (
-        "trk=public_post_like-cta",
-        "Log in to your account",
-    )
-
-    lines_out = []
-    for line in content.splitlines():
-        stripped = line.strip()
-
-        # Stop at engagement/CTA markers
-        if any(m in stripped for m in stop_markers):
-            break
-
-        # Skip known noise patterns
-        if any(re.match(pat, stripped) for pat in x_noise_patterns):
-            continue
-
-        # Skip lines that are just X navigation URLs
-        if re.match(r'^\[[^\]]*\]\(https://(?:x\.com|twitter\.com)/(?:tos|privacy|login|signup|help|i/flow)', stripped):
-            continue
-
-        lines_out.append(line)
-
-    joined = "\n".join(lines_out)
-    # Collapse 3+ blank lines to 2
-    joined = re.sub(r'\n{3,}', '\n\n', joined)
-    # Ensure paragraph breaks between adjacent non-empty lines
-    result_lines = joined.split('\n')
-    final_lines = []
-    for i, line in enumerate(result_lines):
-        final_lines.append(line)
-        if line.strip() and i + 1 < len(result_lines) and result_lines[i + 1].strip():
-            final_lines.append('')
-    return '\n'.join(final_lines).strip()
-
-
-def fetch_via_readability_js(url: str) -> dict:
-    """@mozilla/readability + turndown via Bun — ultimate-fetcher 실패 시 폴백."""
-    script = Path(__file__).parent / "readability_fetch.mjs"
-    if not script.exists():
-        return {}
-    bun = shutil.which("bun") or "/Users/hmkwon/.bun/bin/bun"
-    try:
-        proc = subprocess.run(
-            [bun, str(script), url],
-            capture_output=True, text=True, timeout=30,
-        )
-        if proc.stdout.strip():
-            result = json.loads(proc.stdout.strip())
-            if result.get("content") and not result.get("error"):
-                return {
-                    "title": result.get("title", "") or urlparse(url).netloc,
-                    "content": result["content"],
-                    "method": "readability-js",
-                    "domain_hint": detect_domain_hint(url, result.get("title", ""), result["content"]),
-                }
-    except Exception as e:
-        print(f"readability-js 폴백 실패: {e}", file=sys.stderr)
-    return {}
-
-
-def determine_source_type(url: str, declared_type: str = "") -> str:
-    if declared_type == "thread" or is_twitter_url(url):
-        return "thread"
-    return declared_type or "url"
+
+
+UF_VENV_PYTHON = str(Path.home() / "Projects" / "ultimate-fetcher" / ".venv" / "bin" / "python3")
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 METHOD_MAP = {
@@ -582,8 +95,6 @@ METHOD_MAP = {
 }
 
 
-def normalize_method(raw_method: str) -> str:
-    return METHOD_MAP.get(raw_method, raw_method)
 
 
 async def _fetch_via_ultimate_fetcher(url: str) -> dict:
@@ -658,167 +169,12 @@ async def _fetch_via_ultimate_fetcher(url: str) -> dict:
     }
 
 
-def sanitize_slug(slug: str) -> str:
-    """Produce an ASCII-only URL slug. Korean/CJK characters are dropped."""
-    # NFKD separates accented Latin base chars from combining marks
-    normalized = unicodedata.normalize("NFKD", slug)
-    # Remove combining marks (accents, etc.) and keep only ASCII printable
-    ascii_only = "".join(c for c in normalized if ord(c) < 128 and not unicodedata.combining(c))
-    # Keep only word chars, hyphens, and spaces
-    ascii_only = re.sub(r"[^\w\s-]", "", ascii_only)
-    # Collapse whitespace/underscores to hyphens
-    ascii_only = re.sub(r"[\s_]+", "-", ascii_only)
-    ascii_only = re.sub(r"-{2,}", "-", ascii_only)
-    return ascii_only.strip("-").lower()
 
 
-def _clean_fxtwitter_content(content: str) -> tuple[str, str, str]:
-    """Strip fxtwitter metadata boilerplate. Returns (cleaned_content, author, title).
-
-    fxtwitter returns:
-        **Author**: Name (@handle)
-        **URL**: https://x.com/...
-        **Stats**: N Likes | N Retweets | N Views
-
-        ## Tweet Content
-
-        [actual tweet text]
-    """
-    author = ""
-    title = ""
-    lines = content.splitlines()
-    content_start = 0
-
-    for i, line in enumerate(lines):
-        stripped = line.strip()
-        # Extract author name before stripping
-        m = re.match(r'^\*\*Author\*\*:\s*(.+?)\s*\(@\w+\)', stripped)
-        if m:
-            author = m.group(1).strip()
-            content_start = i + 1
-            continue
-        if re.match(r'^\*\*URL\*\*:', stripped):
-            content_start = i + 1
-            continue
-        if re.match(r'^\*\*Stats\*\*:', stripped):
-            content_start = i + 1
-            continue
-        if re.match(r'^##\s+Tweet Content\s*$', stripped):
-            content_start = i + 1
-            continue
-
-    cleaned_lines = lines[content_start:]
-    # Drop leading blank lines
-    while cleaned_lines and not cleaned_lines[0].strip():
-        cleaned_lines.pop(0)
-
-    cleaned = "\n".join(cleaned_lines).strip()
-
-    # Extract title: first non-empty, non-URL line
-    for line in cleaned_lines:
-        s = line.strip()
-        if s and not s.startswith("http"):
-            title = s.lstrip("#").strip()
-            # Truncate at 80 chars for title
-            if len(title) > 80:
-                title = title[:77].rstrip() + "…"
-            break
-
-    return cleaned, author, title
 
 
-def _clean_jina_content(content: str, title: str) -> str:
-    """Strip Jina AI metadata headers and duplicate H1 from fetched body content."""
-    lines = content.splitlines()
-    cleaned = []
-    skip_next_blank = False
-    for line in lines:
-        # Strip Jina metadata lines
-        if re.match(r"^(URL Source|Published Time|Markdown Content|Number of Pages)\s*:", line):
-            skip_next_blank = True
-            continue
-        if skip_next_blank and line.strip() == "":
-            skip_next_blank = False
-            continue
-        skip_next_blank = False
-        cleaned.append(line)
-
-    # Remove leading H1 that duplicates the frontmatter title
-    result = "\n".join(cleaned)
-    title_core = re.sub(r"[^\w\s]", "", title).strip().lower()
-    first_h1 = re.match(r"^#\s+(.+)", result.lstrip(), re.MULTILINE)
-    if first_h1:
-        h1_core = re.sub(r"[^\w\s]", "", first_h1.group(1)).strip().lower()
-        if h1_core == title_core or title_core.startswith(h1_core) or h1_core.startswith(title_core):
-            result = result.lstrip()
-            result = re.sub(r"^#\s+.+\n*", "", result, count=1)
-
-    return result.strip()
 
 
-def format_clipping(url: str, title: str, content: str, method: str,
-                    source_type: str, domain_hint: str, output_dir: Path) -> Path:
-    """Write a clipping .md file with YAML front matter."""
-    # Decode percent-encoded URLs (e.g. Korean slugs) for readability
-    url = unquote(url)
-    author = ""
-    # Clean platform-specific boilerplate before storing
-    if is_linkedin_url(url):
-        content = _clean_linkedin_content(content)
-    if is_twitter_url(url):
-        content = _clean_x_content(content)
-    # fxtwitter: strip Author/URL/Stats/## Tweet Content metadata and extract author+title
-    if method == "fxtwitter" and (source_type == "thread" or is_twitter_url(url)):
-        content, author, extracted_title = _clean_fxtwitter_content(content)
-        if extracted_title and (not title or title.startswith("Tweet by") or title.startswith("tweet")):
-            title = extracted_title
-    # Strip Jina metadata headers from all non-thread content
-    if source_type != "thread" and not is_twitter_url(url):
-        content = _clean_jina_content(content, title)
-    date = datetime.now().strftime("%Y%m%d")
-    slug = sanitize_slug(slug_from_title_and_url(title, url) or urlparse(url).netloc.replace(".", "-"))
-    filename = f"{date}-{slug}.md"
-    word_count = len(content.split())
-
-    tags = []
-    if source_type == "thread" or is_twitter_url(url):
-        tags = ["thread", "x.com"]
-    elif is_youtube_url(url):
-        tags = ["video", "youtube"]
-    elif is_reddit_url(url):
-        tags = ["reddit"]
-
-    front_matter_data = {
-        "source_url": url,
-        "source_type": source_type,
-        "clipped_at": datetime.now().isoformat(),
-        "title": title,
-        "author": author,
-        "word_count": word_count,
-        "fetch_method": method,
-        "status": "clipped",
-        "domain_hint": domain_hint,
-        "tags": tags,
-    }
-    front_matter = f"---\n{_yaml_dump(front_matter_data)}\n---\n"
-
-    if source_type == "thread" or is_twitter_url(url):
-        # Single footer link — no duplicate URL header
-        body = f"""{content}
-
----
-*원문: [{url}]({url})*
-"""
-    else:
-        body = f"""{content}
-
----
-*원문: [{url}]({url})*
-"""
-
-    path = output_dir / filename
-    path.write_text(front_matter + body)
-    return path
 
 
 def _run_as_subprocess(url: str, output_dir: Path, source_type: str, python_bin: str) -> dict:
@@ -894,36 +250,8 @@ def _run_as_subprocess(url: str, output_dir: Path, source_type: str, python_bin:
     }
 
 
-def _normalize_url_for_dedup(url: str) -> str:
-    """Strip tracking params and trailing slash for duplicate detection."""
-    from urllib.parse import urlencode, parse_qsl
-    url = url.strip().strip('"').strip("'")
-    try:
-        p = urlparse(url)
-        TRACKING = {"si", "utm_source", "utm_medium", "utm_campaign",
-                    "utm_term", "utm_content", "fbclid", "gclid", "ref"}
-        qs = [(k, v) for k, v in parse_qsl(p.query) if k not in TRACKING]
-        return p._replace(query=urlencode(qs), fragment="").geturl().rstrip("/")
-    except Exception:
-        return url.rstrip("/")
 
 
-def find_existing_clipping(url: str, output_dir: Path) -> Path | None:
-    """Return path to existing clipping with same normalized URL, or None."""
-    target = _normalize_url_for_dedup(url)
-    for cf in output_dir.glob("*.md"):
-        try:
-            for line in cf.read_text(errors="ignore").split("\n"):
-                if line.startswith("source_url:"):
-                    existing = _normalize_url_for_dedup(
-                        line.split("source_url:", 1)[1].strip()
-                    )
-                    if existing == target:
-                        return cf
-                    break
-        except Exception:
-            pass
-    return None
 
 
 def fetch_and_save(url: str, output_dir: Path, source_type: str = "",
