@@ -1,20 +1,19 @@
 """
 Fetcher Bridge — wraps ultimate-fetcher for the wiki pipeline.
 
-Uses subprocess with ultimate-fetcher's venv Python for reliable execution,
-since the system Python cannot import ultimate_fetcher directly.
+With ultimate-fetcher installed in the same venv (via `pip install -e`
+or `pip install ultimate-fetcher`), this module imports it directly
+without subprocess overhead.
 
-When called as CLI under ultimate-fetcher's venv Python, runs the fetch
-directly via asyncio. When called as a module (from pipeline.py), delegates
-to the venv Python subprocess.
+Falls back to Readability.js (Bun) or subprocess if direct import fails.
 
 Usage:
   # As Python module (from pipeline.py):
   from fetcher_bridge import fetch_and_save
   result = fetch_and_save("https://example.com", Path("clippings"))
 
-  # As CLI (under ultimate-fetcher venv Python):
-  /path/to/ultimate-fetcher/.venv/bin/python3 fetcher_bridge.py "https://example.com" --output clippings/
+  # As CLI:
+  python3 scripts/fetcher_bridge.py "https://example.com" --output clippings/
 """
 
 import asyncio
@@ -36,16 +35,24 @@ from fetchers.youtube import fetch_youtube_transcript, is_youtube_video_url
 from fetchers.pdf import fetch_pdf_via_marker, is_pdf_url
 from fetchers.twitter import fetch_via_fxtwitter, is_twitter_url
 from fetchers.readability import fetch_via_readability_js
-from fetchers.utils import format_clipping, determine_source_type, _normalize_url_for_dedup, find_existing_clipping
+from fetchers.utils import (
+    format_clipping,
+    determine_source_type,
+    _normalize_url_for_dedup,
+    find_existing_clipping,
+    detect_domain_hint,
+    normalize_method,
+)
 
 # yt-dlp binary (search PATH then common Homebrew location)
 YT_DLP = shutil.which("yt-dlp") or "/opt/homebrew/bin/yt-dlp"
 
-
-
-
-
-UF_VENV_PYTHON = str(Path.home() / "Projects" / "ultimate-fetcher" / ".venv" / "bin" / "python3")
+# Fallback subprocess python if direct import unavailable (legacy support)
+_UF_VENV_PYTHON_CANDIDATES = [
+    Path.home() / "Projects" / "ultimate-fetcher" / ".venv" / "bin" / "python3",
+    Path("/usr/local/bin/python3"),
+]
+UF_VENV_PYTHON = next((str(p) for p in _UF_VENV_PYTHON_CANDIDATES if p.exists()), "python3")
 
 
 
@@ -92,6 +99,18 @@ METHOD_MAP = {
     "github_gh_cli": "gh-cli",
     "hackernews_firebase": "hn-api",
     "rss_feedparser": "rss",
+    # LinkedIn
+    "linkedin_curl_cffi/chrome": "linkedin-curl_cffi",
+    "linkedin_curl_cffi/safari": "linkedin-curl_cffi",
+    "linkedin_playwright": "linkedin-playwright",
+    "linkedin_mobile": "linkedin-mobile",
+    "linkedin_failed": "failed",
+    # Facebook
+    "facebook_curl_cffi/chrome": "facebook-curl_cffi",
+    "facebook_curl_cffi/safari": "facebook-curl_cffi",
+    "facebook_playwright": "facebook-playwright",
+    "facebook_mobile": "facebook-mobile",
+    "facebook_failed": "failed",
 }
 
 
@@ -124,7 +143,9 @@ async def _fetch_via_ultimate_fetcher(url: str) -> dict:
             result = fallback_result
 
     title = result.get("title", "")
-    content = result.get("markdown", "") or result.get("text", "")
+    # LinkedIn/Facebook plugins set 'content' (pre-cleaned). Use it preferentially
+    # over 'markdown' to avoid redundant noise stripping.
+    content = result.get("content", "") or result.get("markdown", "") or result.get("text", "")
     method = normalize_method(result.get("method", "unknown"))
 
     # Strip common title prefixes from fetcher output

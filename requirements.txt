@@ -3,7 +3,11 @@
 # Or use: bash scripts/setup_venv.sh
 
 # Core fetcher (3-phase adaptive + platform plugins)
+# Supports: LinkedIn, Facebook, Twitter/X, YouTube, Reddit, GitHub, HackerNews, RSS
+# Option A — install from GitHub (recommended for template users):
 ultimate-fetcher @ git+https://github.com/dataofmen/ultimate-fetcher.git
+# Option B — editable local install (if you cloned ultimate-fetcher locally):
+# -e /path/to/ultimate-fetcher
 
 # PDF extraction (not covered by ultimate-fetcher)
 pdfplumber

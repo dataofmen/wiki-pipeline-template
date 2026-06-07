@@ -98,8 +98,13 @@ def format_clipping(url: str, title: str, content: str, method: str,
     # Decode percent-encoded URLs (e.g. Korean slugs) for readability
     url = unquote(url)
     author = ""
-    # Clean platform-specific boilerplate before storing
-    if is_linkedin_url(url):
+    # Clean platform-specific boilerplate before storing.
+    # Skip LinkedIn cleaning when ultimate-fetcher's LinkedIn plugin already cleaned it
+    # (identified by method starting with "linkedin-" or "linkedin_").
+    uf_handled_linkedin = method and (
+        method.startswith("linkedin-") or method.startswith("linkedin_")
+    )
+    if is_linkedin_url(url) and not uf_handled_linkedin:
         content = _clean_linkedin_content(content)
     if is_twitter_url(url):
         from fetchers.twitter import _clean_x_content
@@ -110,7 +115,7 @@ def format_clipping(url: str, title: str, content: str, method: str,
         content, author, extracted_title = _clean_fxtwitter_content(content)
         if extracted_title and (not title or title.startswith("Tweet by") or title.startswith("tweet")):
             title = extracted_title
-    # Strip Jina metadata headers from all non-thread content
+    # Strip Jina metadata headers from all non-thread, non-social content
     if source_type != "thread" and not is_twitter_url(url):
         content = _clean_jina_content(content, title)
     date = datetime.now().strftime("%Y%m%d")
@@ -125,6 +130,10 @@ def format_clipping(url: str, title: str, content: str, method: str,
         tags = ["video", "youtube"]
     elif is_reddit_url(url):
         tags = ["reddit"]
+    elif is_linkedin_url(url):
+        tags = ["linkedin"]
+    elif is_facebook_url(url):
+        tags = ["facebook"]
 
     front_matter_data = {
         "source_url": url,
@@ -191,6 +200,10 @@ def is_twitter_url(url: str) -> bool:
 def is_youtube_url(url: str) -> bool:
     domain = urlparse(url).netloc.lower()
     return "youtube.com" in domain or "youtu.be" in domain
+
+def is_facebook_url(url: str) -> bool:
+    domain = urlparse(url).netloc.lower()
+    return "facebook.com" in domain or "fb.com" in domain
 
 
 def _clean_linkedin_content(content: str) -> str:
