@@ -386,8 +386,9 @@ def scan_inbox() -> list[dict]:
                                 title = line.split("title:", 1)[1].strip()
                             if line.startswith("status:"):
                                 meta_status = line.split("status:", 1)[1].strip()
-                    # Skip if meta.yaml says processed
-                    if meta_status == "processed":
+                    # Skip unless meta.yaml says pending/processing (or has no status).
+                    # e.g. "processed" and "archived" (backlog freeze) must not re-ingest.
+                    if meta_status not in ("", "pending", "processing"):
                         continue
                     # Skip if URL already has a clipping
                     if source_url and _normalize_url(source_url) in already_clipped:
@@ -406,6 +407,13 @@ def scan_inbox() -> list[dict]:
                     })
         if subdir == "pdfs":
             for f in dir_path.glob("*.pdf"):
+                # PDFs carry no inline status — consult the sidecar meta.yaml
+                # so processed/archived PDFs aren't re-ingested every run.
+                meta_path = f.parent / f"{f.name}.meta.yaml"
+                if meta_path.exists():
+                    meta_content = meta_path.read_text(errors="ignore")
+                    if "status: pending" not in meta_content and "status: processing" not in meta_content:
+                        continue
                 if not any(p.get("inbox_path", "").endswith(f.name) for p in pending):
                     pending.append({
                         "source_url": str(f),
@@ -516,7 +524,9 @@ def phase_ingest(pending: list[dict]) -> list[dict]:
                     if meta_path.exists():
                         _mark_inbox_processed(str(meta_path))
                     else:
-                        _mark_inbox_processed(inbox_path)
+                        # Binary files can't hold a status line — create the sidecar
+                        # meta so scan_inbox skips this PDF on subsequent runs.
+                        meta_path.write_text(f"status: processed\nclipping: {clipping_path}\n")
 
             # Image extraction via Vision API
             elif source_type == "image" and inbox_path:
