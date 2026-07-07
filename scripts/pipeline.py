@@ -200,8 +200,11 @@ def run_cmd(cmd: list[str], cwd: Path | None = None, check: bool = True, env: di
 
 def _normalize_url(url: str) -> str:
     """Strip quotes, fragments, and tracking-only query params for dedup comparison."""
-    from urllib.parse import urlparse, urlencode, parse_qsl
+    from urllib.parse import urlparse, urlencode, parse_qsl, unquote
     url = url.strip().strip('"').strip("'")
+    # Percent-decode so encoded (inbox) and decoded (clipping) forms of the same
+    # URL compare equal — otherwise the orphan check re-fetches forever.
+    url = unquote(url)
     try:
         p = urlparse(url)
         # Remove tracking-only params that change per share link
