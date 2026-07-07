@@ -33,37 +33,50 @@ def main():
 
     import subprocess
     import shutil
+    import tempfile
 
-    gemini_bin = shutil.which("gemini") or "/opt/homebrew/bin/gemini"
-    
+    codex_bin = shutil.which("codex", path=":".join([
+        str(Path.home() / ".local" / "bin"),
+        "/opt/homebrew/bin",
+        "/usr/local/bin",
+        "/Applications/cmux.app/Contents/Resources/bin",
+        os.environ.get("PATH", "/usr/bin:/bin"),
+    ])) or "codex"
+
     prompt = (
-        f"Extract all the text and content from the image @{image_path.absolute()} accurately. "
+        "Extract all the text and content from the attached image accurately. "
         "Maintain the formatting, headings, bullet points, and any code blocks if present. "
         "If it is a diagram, describe its contents. "
         "Return ONLY the extracted markdown text without any conversational preamble."
     )
 
     try:
+        # codex exec prints a session log to stdout; -o writes just the final
+        # message to a file, so read that instead of parsing stdout.
+        with tempfile.NamedTemporaryFile(mode="r", suffix=".md", delete=False) as tf:
+            out_path = tf.name
         process = subprocess.run(
-            [gemini_bin, "-p", prompt],
+            [codex_bin, "exec", "--skip-git-repo-check",
+             "-i", str(image_path.absolute()), "-o", out_path, prompt],
             capture_output=True,
             text=True,
             encoding="utf-8",
             errors="ignore",
-            timeout=300,  # gemini CLI can hang waiting for interactive input/auth
+            timeout=300,  # never let a hung CLI stall the pipeline
         )
         if process.returncode != 0:
-            print(f"Error during Gemini CLI call: exit code {process.returncode}", file=sys.stderr)
+            print(f"Error during Codex CLI call: exit code {process.returncode}", file=sys.stderr)
             print(process.stderr, file=sys.stderr)
+            Path(out_path).unlink(missing_ok=True)
             sys.exit(1)
-        
-        # gemini CLI output sometimes includes ANSI or other things, but -p usually just outputs the text
-        content = process.stdout.strip()
+
+        content = Path(out_path).read_text(encoding="utf-8", errors="ignore").strip()
+        Path(out_path).unlink(missing_ok=True)
         if not content:
-            print("Warning: Gemini CLI returned empty string.", file=sys.stderr)
+            print("Warning: Codex CLI returned empty string.", file=sys.stderr)
             sys.exit(1)
     except Exception as e:
-        print(f"Error executing Gemini CLI: {e}", file=sys.stderr)
+        print(f"Error executing Codex CLI: {e}", file=sys.stderr)
         sys.exit(1)
 
     lines = [l.strip() for l in content.splitlines() if l.strip() and not l.startswith("![")]
@@ -92,7 +105,7 @@ source_url: ""
 source_type: image
 clipped_at: "{datetime.now().isoformat()}"
 title: "{title.replace('"', '')}"
-fetch_method: gemini_cli
+fetch_method: codex_cli
 status: clipped
 domain_hint: general
 tags: []

@@ -1,5 +1,6 @@
 import os
 import re
+import sys
 import yaml
 import logging
 import argparse
@@ -285,7 +286,10 @@ def check_moc_status(auto_heal=False):
     try:
         if auto_heal:
             logger.info("Auto-healing: Forcing MOC update...")
-            subprocess.run(["python3", "scripts/generate_moc.py"], cwd=WORKSPACE_DIR, check=True)
+            # sys.executable keeps the venv interpreter (bare python3 may lack
+            # yaml); timeout bounds the codex synthesis call inside.
+            subprocess.run([sys.executable, "scripts/generate_moc.py"],
+                           cwd=WORKSPACE_DIR, check=True, timeout=600)
             return True
     except Exception as e:
         logger.error(f"[MOC Error] Failed to generate MOCs: {e}")
