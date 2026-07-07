@@ -3,11 +3,14 @@ Inbox 폴더 감시 → 파이프라인 자동 트리거
 사용법: python3 inbox_watcher.py
 
 Python 파이프라인(Phases 3-6)을 직접 실행하고,
-Note Maker(Phase 4)만 Claude Code에 위임합니다.
+Note Maker(Phase 4)만 Codex CLI에 위임합니다.
 """
 import time
 import subprocess
 import logging
+import os
+import sys
+import fcntl
 from pathlib import Path
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
@@ -49,18 +52,38 @@ class InboxHandler(FileSystemEventHandler):
 
     def trigger_if_ready(self):
         if self._pending and (time.time() - self._last_event) >= DEBOUNCE_SECONDS:
-            self._pending = False
-            # Lock file to prevent concurrent pipeline runs
-            if LOCK_FILE.exists():
-                lock_age = time.time() - LOCK_FILE.stat().st_mtime
-                if lock_age < 600:  # Lock is less than 10 min old
-                    logging.info("Pipeline already running, skipping trigger.")
-                    return
-                else:
-                    logging.warning("Stale lock file detected (>10 min), removing.")
-                    LOCK_FILE.unlink(missing_ok=True)
+            # Check if pipeline is currently running by attempting to acquire the lock
+            pipeline_running = False
+            lock_fd = None
+            try:
+                # Create parent directories if they don't exist
+                LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
+                lock_fd = open(LOCK_FILE, "a")
+                fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                # Got lock, meaning pipeline is NOT running
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            except OSError:
+                pipeline_running = True
+            finally:
+                if lock_fd:
+                    lock_fd.close()
 
-            LOCK_FILE.touch()
+            if pipeline_running:
+                logging.info("Pipeline already running, keeping trigger pending.")
+                return
+
+            # Pause switch: while scripts/.pipeline_paused exists, inbox items are
+            # still received/saved but the pipeline is NOT auto-triggered. Delete
+            # the sentinel to resume automation. (US-002 rebuild safety)
+            if (SCRIPTS_DIR / ".pipeline_paused").exists():
+                self._pending = False
+                logging.info(
+                    "Pipeline auto-trigger paused (scripts/.pipeline_paused present); "
+                    "inbox saved, skipping pipeline run."
+                )
+                return
+
+            self._pending = False
             python_bin = VENV_PYTHON if Path(VENV_PYTHON).exists() else "python3"
             logging.info(f"Python 파이프라인 트리거 ({python_bin})")
             subprocess.Popen(
@@ -70,6 +93,16 @@ class InboxHandler(FileSystemEventHandler):
 
 
 def main():
+    # Single-instance lock to prevent duplicate watchers
+    watcher_lock = SCRIPTS_DIR / ".inbox_watcher.lock"
+    watcher_lock.parent.mkdir(parents=True, exist_ok=True)
+    lock_fd = open(watcher_lock, "w")
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        logging.warning("Another inbox_watcher instance is already running — exiting")
+        sys.exit(0)
+
     handler = InboxHandler()
 
     # 시작 시 기존 pending 파일 확인

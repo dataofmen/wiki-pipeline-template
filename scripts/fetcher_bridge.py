@@ -36,14 +36,17 @@ from fetchers.youtube import fetch_youtube_transcript, is_youtube_video_url
 from fetchers.pdf import fetch_pdf_via_marker, is_pdf_url
 from fetchers.twitter import fetch_via_fxtwitter, is_twitter_url
 from fetchers.readability import fetch_via_readability_js
-from fetchers.utils import format_clipping, determine_source_type, _normalize_url_for_dedup, find_existing_clipping
+from fetchers.utils import (
+    format_clipping, 
+    determine_source_type, 
+    _normalize_url_for_dedup, 
+    find_existing_clipping,
+    detect_domain_hint,
+    normalize_method
+)
 
 # yt-dlp binary (search PATH then common Homebrew location)
 YT_DLP = shutil.which("yt-dlp") or "/opt/homebrew/bin/yt-dlp"
-
-
-
-
 
 UF_VENV_PYTHON = str(Path.home() / "Projects" / "ultimate-fetcher" / ".venv" / "bin" / "python3")
 
@@ -76,27 +79,6 @@ UF_VENV_PYTHON = str(Path.home() / "Projects" / "ultimate-fetcher" / ".venv" / "
 
 
 
-
-
-METHOD_MAP = {
-    "jina": "jina",
-    "curl_cffi/chrome": "curl_cffi",
-    "curl_cffi/safari": "curl_cffi",
-    "curl_cffi/safari_ios": "curl_cffi",
-    "playwright": "playwright",
-    "twitter_fxtwitter": "fxtwitter",
-    "twitter_oembed": "oembed",
-    "twitter_nitter": "nitter",
-    "youtube_yt-dlp": "yt-dlp",
-    "reddit_json_api": "reddit-api",
-    "github_gh_cli": "gh-cli",
-    "hackernews_firebase": "hn-api",
-    "rss_feedparser": "rss",
-}
-
-
-
-
 async def _fetch_via_ultimate_fetcher(url: str) -> dict:
     """Call ultimate_fetcher.route_request and normalize the result."""
     try:
@@ -124,7 +106,9 @@ async def _fetch_via_ultimate_fetcher(url: str) -> dict:
             result = fallback_result
 
     title = result.get("title", "")
-    content = result.get("markdown", "") or result.get("text", "")
+    # LinkedIn/Facebook plugins set 'content' (pre-cleaned). Use it preferentially
+    # over 'markdown' to avoid redundant noise stripping.
+    content = result.get("content", "") or result.get("markdown", "") or result.get("text", "")
     method = normalize_method(result.get("method", "unknown"))
 
     # Strip common title prefixes from fetcher output
@@ -159,6 +143,9 @@ async def _fetch_via_ultimate_fetcher(url: str) -> dict:
             if stripped and len(stripped) > 5:
                 title = stripped
                 break
+
+    # Strip common title prefixes from fetcher output (run again at end to catch Jina-extracted title prefix)
+    title = re.sub(r"^[Tt]itle:\s*", "", title).strip()
 
     return {
         "title": title or urlparse(url).netloc,

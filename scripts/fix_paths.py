@@ -1,3 +1,4 @@
+# DEPRECATED (US-005): 기능이 scripts/normalize.py 로 흡수됨. 신규 코드는 normalize.py 를 사용할 것.
 import os
 import shutil
 import re
@@ -10,7 +11,7 @@ def get_frontmatter(content):
     return ""
 
 def parse_yaml(yaml_text, key):
-    match = re.search(f"^{key}:\s*(.+)$", yaml_text, re.MULTILINE)
+    match = re.search(rf"^{key}:\s*(.+)$", yaml_text, re.MULTILINE)
     if match:
         return match.group(1).strip().strip('"\'')
     return None
@@ -38,18 +39,20 @@ def fix_all_paths(root_dir):
             target = parse_yaml(fm, "target")
             type_val = parse_yaml(fm, "type")
             
-            # Determine correct directory
+            # Determine correct directory.
+            # Public /wiki has exactly two child folders: concepts/ and entities/.
+            # Any legacy wiki/*.md or wiki/<other-folder>/*.md file is normalized
+            # into one of those two buckets so sync_content.sh never publishes
+            # extra wiki sections such as /wiki/events/.
             if target == "human":
                 correct_dir = root / "garden"
-            elif target == "machine":
-                if type_val == "concept":
-                    correct_dir = root / "wiki" / "concepts"
-                elif type_val == "entity":
+            elif target == "machine" or folder == "wiki":
+                if type_val and type_val.startswith("entity"):
                     correct_dir = root / "wiki" / "entities"
-                elif type_val == "procedure":
-                    correct_dir = root / "wiki"
                 else:
-                    correct_dir = root / "wiki" # Fallback
+                    # concept is the default for every non-entity wiki note,
+                    # including legacy notes that predate target/type fields.
+                    correct_dir = root / "wiki" / "concepts"
             else:
                 continue # Unknown
                 

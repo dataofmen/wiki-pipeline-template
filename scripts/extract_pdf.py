@@ -78,6 +78,16 @@ def save_clipping(pdf_path: Path, title: str, content: str, output_dir: Path) ->
     slug = slug_from_title(title) or pdf_path.stem[:30]
     filename = f"{date}-{slug}.md"
     domain_hint = detect_domain_hint(title, content)
+    
+    # INLINE VALIDATION
+    if len(content.strip()) < 50:
+        print(f"Error: Extracted PDF content is too short ({len(content.strip())} chars). Rejecting extraction.", file=sys.stderr)
+        sys.exit(1)
+        
+    if not title or title == "0" or title == "(0)":
+        print(f"Error: Extracted PDF title is invalid ('{title}'). Rejecting extraction.", file=sys.stderr)
+        sys.exit(1)
+        
     word_count = len(content.split())
 
     front_matter = f"""---

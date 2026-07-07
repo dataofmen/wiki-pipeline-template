@@ -15,8 +15,23 @@ python3 "$WIKI_ROOT/scripts/fix_yaml_titles.py"
 echo "노트 디렉토리 위치 보정 중..."
 python3 "$WIKI_ROOT/scripts/fix_paths.py"
 
-for folder in wiki garden clippings; do
-  rsync -av --delete "$WIKI_ROOT/$folder/" "$QUARTZ_CONTENT/$folder/"
+# Public /wiki must expose only two child folders:
+#   /wiki/entities/  — people, tools, orgs, frameworks
+#   /wiki/concepts/  — every other machine-readable wiki note
+# Do not sync arbitrary files or folders directly under wiki/ (e.g. legacy
+# wiki/*.md or wiki/events/), because Quartz will publish them as additional
+# top-level wiki sections.
+rm -rf "$QUARTZ_CONTENT/wiki"
+mkdir -p "$QUARTZ_CONTENT/wiki/concepts" "$QUARTZ_CONTENT/wiki/entities"
+rsync -av --exclude="_quarantine" --delete "$WIKI_ROOT/wiki/concepts/" "$QUARTZ_CONTENT/wiki/concepts/"
+rsync -av --exclude="_quarantine" --delete "$WIKI_ROOT/wiki/entities/" "$QUARTZ_CONTENT/wiki/entities/"
+
+for folder in garden clippings; do
+  if [ "$folder" = "clippings" ]; then
+    rsync -av --exclude="_quarantine" --exclude="*/" --delete "$WIKI_ROOT/$folder/" "$QUARTZ_CONTENT/$folder/"
+  else
+    rsync -av --exclude="_quarantine" --delete "$WIKI_ROOT/$folder/" "$QUARTZ_CONTENT/$folder/"
+  fi
 done
 
 cp "$WIKI_ROOT/index.md" "$QUARTZ_CONTENT/index.md"

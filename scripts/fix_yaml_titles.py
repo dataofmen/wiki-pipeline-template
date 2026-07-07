@@ -1,3 +1,4 @@
+# DEPRECATED (US-005): 기능이 scripts/normalize.py 로 흡수됨. 신규 코드는 normalize.py 를 사용할 것.
 import os
 import re
 import json

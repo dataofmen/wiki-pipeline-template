@@ -56,6 +56,7 @@ def collect_notes(domain = None, target = None) -> list[dict]:
                 "domain": front.get("domain", ""),
                 "target": front.get("target", ""),
                 "tags": front.get("tags", []),
+                "relations": front.get("relations", []) + front.get("pending_relations", []),
                 "body": get_note_body(text),
                 "source_url": front.get("source_url", ""),
             })
@@ -76,10 +77,24 @@ def format_context(notes: list[dict], fmt: str) -> str:
     elif fmt == "titles":
         return "\n".join(f"- {n['title']} ({n['path']})" for n in notes)
 
+    elif fmt == "graph":
+        lines = ["# Knowledge Graph Context"]
+        for n in notes:
+            rels = n.get("relations", [])
+            if rels:
+                lines.append(f"## {n['title']} (Domain: {n['domain']})")
+                for r in rels:
+                    if isinstance(r, dict):
+                        lines.append(f"- [{r.get('type')}] -> {r.get('target')} (Evidence: {r.get('evidence')})")
+        return "\n".join(lines)
+
     else:  # full
         parts = []
         for n in notes:
-            parts.append(f"# {n['title']}\n\n{n['body']}")
+            rel_str = ""
+            if n.get("relations"):
+                rel_str = "\n### Relations\n" + "\n".join(f"- [{r.get('type')}] -> {r.get('target')} : {r.get('evidence')}" for r in n["relations"] if isinstance(r, dict)) + "\n"
+            parts.append(f"# {n['title']}{rel_str}\n\n{n['body']}")
         return "\n\n---\n\n".join(parts)
 
 
@@ -87,7 +102,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--domain", default=None, help="domain 태그 필터 (예: trading, ux)")
     parser.add_argument("--target", default=None, choices=["machine", "human"], help="wiki/ 또는 garden/ 필터")
-    parser.add_argument("--format", default="full", choices=["full", "summary", "titles"])
+    parser.add_argument("--format", default="full", choices=["full", "summary", "titles", "graph"])
     parser.add_argument("--max-tokens", type=int, default=None, help="대략적 토큰 한계 (단어 수 기준)")
     args = parser.parse_args()
 

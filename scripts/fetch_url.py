@@ -93,8 +93,13 @@ def detect_domain_hint(url: str, title: str, content: str) -> str:
 
 
 def save_clipping(url: str, title: str, content: str, method: str, output_dir: Path) -> Path:
+    # Clean title prefix
+    title = re.sub(r"^[Tt]itle:\s*", "", title).strip()
+    from fetchers.utils import extract_first_sentence, truncate_title_by_language
+    title = truncate_title_by_language(extract_first_sentence(title))
     date = datetime.now().strftime("%Y%m%d")
     slug = sanitize_slug(slug_from_title(title) or urlparse(url).netloc.replace(".", "-"))
+    slug = slug[:20].strip("-")
     filename = f"{date}-{slug}.md"
     domain_hint = detect_domain_hint(url, title, content)
     word_count = len(content.split())

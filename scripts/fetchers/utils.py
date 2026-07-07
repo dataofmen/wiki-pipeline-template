@@ -76,6 +76,34 @@ def determine_source_type(url: str, declared_type: str = "") -> str:
         return "thread"
     return declared_type or "url"
 
+METHOD_MAP = {
+    "jina": "jina",
+    "curl_cffi/chrome": "curl_cffi",
+    "curl_cffi/safari": "curl_cffi",
+    "curl_cffi/safari_ios": "curl_cffi",
+    "playwright": "playwright",
+    "twitter_fxtwitter": "fxtwitter",
+    "twitter_oembed": "oembed",
+    "twitter_nitter": "nitter",
+    "youtube_yt-dlp": "yt-dlp",
+    "reddit_json_api": "reddit-api",
+    "github_gh_cli": "gh-cli",
+    "hackernews_firebase": "hn-api",
+    "rss_feedparser": "rss",
+    # LinkedIn
+    "linkedin_curl_cffi/chrome": "linkedin-curl_cffi",
+    "linkedin_curl_cffi/safari": "linkedin-curl_cffi",
+    "linkedin_playwright": "linkedin-playwright",
+    "linkedin_mobile": "linkedin-mobile",
+    "linkedin_failed": "failed",
+    # Facebook
+    "facebook_curl_cffi/chrome": "facebook-curl_cffi",
+    "facebook_curl_cffi/safari": "facebook-curl_cffi",
+    "facebook_playwright": "facebook-playwright",
+    "facebook_mobile": "facebook-mobile",
+    "facebook_failed": "failed",
+}
+
 def normalize_method(raw_method: str) -> str:
     return METHOD_MAP.get(raw_method, raw_method)
 
@@ -92,15 +120,69 @@ def sanitize_slug(slug: str) -> str:
     ascii_only = re.sub(r"-{2,}", "-", ascii_only)
     return ascii_only.strip("-").lower()
 
+def extract_first_sentence(text: str) -> str:
+    text = text.strip()
+    if not text:
+        return ""
+    # Split by sentence terminators followed by whitespace, or by newlines
+    segments = [s.strip() for s in re.split(r'(?<=[.!?])\s+|\n+', text) if s.strip()]
+    if not segments:
+        return text
+    
+    first = segments[0]
+    # If the first segment is very short (e.g., <= 12 characters) and there is a next segment, combine them
+    if len(first) <= 12 and len(segments) > 1:
+        first = first + " " + segments[1]
+        
+    return first
+
+def truncate_title_by_language(title: str) -> str:
+    # Check if title has Korean characters
+    has_korean = any(ord(c) >= 0xAC00 and ord(c) <= 0xD7A3 for c in title)
+    
+    max_len = 150 if has_korean else 200
+    if len(title) > max_len:
+        title = title[:max_len-3].strip() + "..."
+    return title
+
 def format_clipping(url: str, title: str, content: str, method: str,
                     source_type: str, domain_hint: str, output_dir: Path) -> Path:
     """Write a clipping .md file with YAML front matter."""
     # Decode percent-encoded URLs (e.g. Korean slugs) for readability
     url = unquote(url)
+    # Clean platform-specific boilerplate before storing.
     author = ""
-    # Clean platform-specific boilerplate before storing
+    # Clean title prefix if any
+    title = re.sub(r"^[Tt]itle:\s*", "", title).strip()
+    
+    is_social = is_twitter_url(url) or is_linkedin_url(url) or is_facebook_url(url)
+    
     if is_linkedin_url(url):
         content = _clean_linkedin_content(content)
+        # Clean title
+        title = re.sub(r"\s*\|\s*[^\|]+$", "", title)  # remove trailing | Author/LinkedIn
+        title = re.sub(r"^[^:]+ on LinkedIn:\s*", "", title)  # remove Author on LinkedIn:
+        title = title.strip()
+
+    # Check if the title is effectively missing (e.g. just the URL)
+    is_url_title = title.startswith("http://") or title.startswith("https://") or title == url
+    
+    if is_social or is_url_title or not title:
+        # No separate title provided by source, extract from content
+        source_text = content
+        if title and not is_url_title and not is_social:
+            source_text = title
+        extracted = extract_first_sentence(source_text)
+        if extracted:
+            title = truncate_title_by_language(extracted)
+        elif is_url_title:
+            title = urlparse(url).netloc
+    else:
+        # Original text has a title. Use it as is!
+        title = re.sub(r"\s+", " ", title).strip()
+        if len(title) > 200:
+            title = title[:197] + "..."
+
     if is_twitter_url(url):
         from fetchers.twitter import _clean_x_content
         content = _clean_x_content(content)
@@ -110,11 +192,12 @@ def format_clipping(url: str, title: str, content: str, method: str,
         content, author, extracted_title = _clean_fxtwitter_content(content)
         if extracted_title and (not title or title.startswith("Tweet by") or title.startswith("tweet")):
             title = extracted_title
-    # Strip Jina metadata headers from all non-thread content
-    if source_type != "thread" and not is_twitter_url(url):
+    # Strip Jina metadata headers from all non-thread, non-social content
+    if source_type != "thread" and not is_twitter_url(url) and not is_linkedin_url(url):
         content = _clean_jina_content(content, title)
     date = datetime.now().strftime("%Y%m%d")
     slug = sanitize_slug(slug_from_title_and_url(title, url) or urlparse(url).netloc.replace(".", "-"))
+    slug = slug[:20].strip("-")
     filename = f"{date}-{slug}.md"
     word_count = len(content.split())
 
@@ -125,6 +208,10 @@ def format_clipping(url: str, title: str, content: str, method: str,
         tags = ["video", "youtube"]
     elif is_reddit_url(url):
         tags = ["reddit"]
+    elif is_linkedin_url(url):
+        tags = ["linkedin"]
+    elif is_facebook_url(url):
+        tags = ["facebook"]
 
     front_matter_data = {
         "source_url": url,
@@ -192,6 +279,10 @@ def is_youtube_url(url: str) -> bool:
     domain = urlparse(url).netloc.lower()
     return "youtube.com" in domain or "youtu.be" in domain
 
+def is_facebook_url(url: str) -> bool:
+    domain = urlparse(url).netloc.lower()
+    return "facebook.com" in domain or "fb.com" in domain
+
 
 def _clean_linkedin_content(content: str) -> str:
     """Strip LinkedIn navigation noise, keeping only the post body text and article link."""
@@ -255,7 +346,7 @@ def _clean_linkedin_content(content: str) -> str:
             continue
         if re.match(r'^\* \[', stripped) and "/uas/login" in stripped:
             continue
-        if re.match(r'^\d+[hdw]$', stripped):  # "23h", "2d", "1w"
+        if re.match(r'^\d+[hdwmo]+$', stripped) or stripped == "Edited":  # "23h", "2d", "1w", "1mo", "Edited"
             continue
         # Bare `!` lines or empty images
         if re.match(r'^!+$', stripped) or re.match(r'^!\[[\s!]*\]\(\s*\)$', stripped):
@@ -297,9 +388,24 @@ def _normalize_url_for_dedup(url: str) -> str:
 def find_existing_clipping(url: str, output_dir: Path) -> Path | None:
     """Return path to existing clipping with same normalized URL, or None."""
     target = _normalize_url_for_dedup(url)
+    failure_markers = [
+        "[스레드 추출 실패",
+        "[fetch failed]",
+        "[원문 추출 실패]",
+        "The request could not be satisfied",
+        "Warning: Target URL returned error",
+        "Request blocked",
+        "403 Forbidden",
+        "403 ERROR",
+        "cloudfront (CloudFront)",
+    ]
     for cf in output_dir.glob("*.md"):
         try:
-            for line in cf.read_text(errors="ignore").split("\n"):
+            content = cf.read_text(errors="ignore")
+            # Skip if failed clipping
+            if any(marker in content for marker in failure_markers) or len(content.strip()) < 150:
+                continue
+            for line in content.split("\n"):
                 if line.startswith("source_url:"):
                     existing = _normalize_url_for_dedup(
                         line.split("source_url:", 1)[1].strip()

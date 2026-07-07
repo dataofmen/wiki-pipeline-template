@@ -3,6 +3,7 @@ import re
 import subprocess
 import shutil
 from pathlib import Path
+from urllib.parse import urlparse
 YT_DLP = shutil.which('yt-dlp') or '/opt/homebrew/bin/yt-dlp'
 
 def is_youtube_url(url: str) -> bool:

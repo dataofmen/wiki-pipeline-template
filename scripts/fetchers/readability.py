@@ -1,6 +1,10 @@
 import json
+import shutil
 import subprocess
+import sys
 from pathlib import Path
+from urllib.parse import urlparse
+from fetchers.utils import detect_domain_hint
 
 def fetch_via_readability_js(url: str) -> dict:
     """@mozilla/readability + turndown via Bun — ultimate-fetcher 실패 시 폴백."""
