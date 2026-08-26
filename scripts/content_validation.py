@@ -54,6 +54,7 @@ TOO_SHORT = "too_short"                   # 본문이 임계치 미달
 LOW_CONFIDENCE = "low_confidence"         # 추출기 경고 + 짧은 본문
 LINK_ONLY = "link_only"                   # 링크 한 줄만 있고 본문이 없음
 NO_DATA = "no_data"                       # 상위 작업(cron 등)이 빈 결과를 남김
+LOW_VALUE = "low_value"                   # 광고·유인 지표 다수 (기계적 의심 신호)
 
 # ------------------------------------------------------- 소스 타입별 최소 단어수
 #
@@ -154,6 +155,63 @@ MD_LINK_RE = re.compile(r"\[([^\]]*)\]\([^)]*\)")
 # `(없음)`, `(none)`, `(내용 없음)` 처럼 채워지지 않은 템플릿 자리표시자 한 줄.
 PLACEHOLDER_LINE_RE = re.compile(r"^\s*(?:[-*]\s*)?\(.{0,60}\)\s*$")
 HEADING_LINE_RE = re.compile(r"^\s*#{1,6}\s")
+
+
+
+# ------------------------------------------------- 저가치(광고·유인) 기계적 지표
+#
+# 가치 판단은 기계가 확정할 수 없다. 여기서 내는 것은 **의심 신호**이고, 판정은
+# note-maker 의 R0 트리아지가 한다. 이 신호는 프롬프트에 실려 "특히 엄격히 보라"는
+# 지시로 쓰인다. 단독으로 노트 생성을 막지 않는다 — 정상적인 투자·비즈니스 글이
+# 수익 수치를 언급하는 것은 흔하기 때문이다.
+#
+# 근거 사례: clippings/20260611-52-19-72.md — "52세 주식 투자 19년 자산 72억 /
+# 나는 이 5가지만 지킨다" 42단어 리딩방 유인 스레드가 wiki/concepts 개념 노트로 승격됐다.
+# 이 클리핑은 VERIFY 를 `ok` 로 통과한다(본문은 정상이므로). 걸러야 할 층이 다르다.
+
+LOW_VALUE_SIGNALS: dict[str, list[str]] = {
+    # 수익·자산 규모 자랑 — 신뢰를 성과로 만들고 방법은 주지 않는 전형
+    "brag": [
+        r"자산\s*\d+\s*억", r"\d+\s*억\s*(?:벌|만들|달성|모)",
+        r"수익률\s*\d{2,}\s*%", r"월\s*\d+\s*(?:만원|만\s*원)\s*(?:수익|벌)",
+        r"\d+\s*배\s*수익", r"원금\s*회복",
+    ],
+    # 비법 프레이밍 — 절차가 아니라 "비밀"로 포장.
+    # 한국어 활용형에 주의: `지키` 는 `지킨다` 를 잡지 못한다(지+킨+다).
+    # 어간 대신 프레이밍 구절 자체("N가지만", "이것만")를 본다.
+    "secret": [
+        r"이것만\s*(?:지키|지킨|지켜|하면|해도|보면)", r"\d+\s*가지만",
+        r"비법", r"비밀\s*공개", r"무료\s*공개",
+        r"아무도\s*모르는", r"절대\s*알려주지\s*않는", r"단\s*하나만",
+    ],
+    # 외부 유인 CTA — 콘텐츠 밖으로 데려가는 것이 목적
+    "cta": [
+        r"\bDM\b", r"디엠\s*주", r"링크\s*클릭", r"프로필\s*링크", r"링크\s*확인",
+        r"오픈\s*채팅", r"오픈톡", r"카톡\s*(?:추가|문의)", r"댓글\s*(?:달아|남겨)",
+        r"지금\s*신청", r"선착순", r"무료\s*체험",
+        r"link in bio", r"DM me", r"get started free", r"limited time",
+        r"sign up now", r"join now",
+    ],
+}
+_LOW_VALUE_RE = {k: [re.compile(p, re.IGNORECASE) for p in v]
+                 for k, v in LOW_VALUE_SIGNALS.items()}
+
+# 저가치 의심으로 올리는 조건: 서로 다른 범주가 이 개수 이상 동시에 맞을 때.
+# 한 범주만 맞는 것은 정상 글에서도 흔하다(투자 분석이 수익률을 언급하는 등).
+LOW_VALUE_MIN_CATEGORIES = 2
+# 긴 본문은 실제 내용이 있을 가능성이 높아 이 신호를 적용하지 않는다.
+LOW_VALUE_MAX_WORDS = 300
+
+
+def low_value_signals(text: str) -> list[str]:
+    """맞은 범주 목록. 판정이 아니라 신호다."""
+    hits = []
+    for cat, pats in _LOW_VALUE_RE.items():
+        for p in pats:
+            if p.search(text):
+                hits.append(cat)
+                break
+    return hits
 
 
 # --------------------------------------------------------------------- 결과
@@ -294,7 +352,7 @@ def validate_content(
                 words, ["link_only"],
             )
 
-    # 3) 알몸 HTTP 에러 코드 한 줄 + 짧은 본문 → 에러 페이지.
+    # 4) 알몸 HTTP 에러 코드 한 줄 + 짧은 본문 → 에러 페이지.
     m = BARE_HTTP_STATUS_RE.search(clean[:CONTEXT_HEAD_CHARS])
     if m and words < CONTEXT_MARKER_MAX_WORDS:
         return ValidationResult(
@@ -302,7 +360,7 @@ def validate_content(
             [f"bare_status:{m.group(1)}"],
         )
 
-    # 4) 문맥 마커(로그인 벽·JS 요구) — 짧은 본문에서만 실패로 인정.
+    # 5) 문맥 마커(로그인 벽·JS 요구) — 짧은 본문에서만 실패로 인정.
     if words < CONTEXT_MARKER_MAX_WORDS:
         for code, marker, label in CONTEXT_MARKERS:
             if marker.lower() in head.lower():
@@ -310,12 +368,12 @@ def validate_content(
                     FAILED, code, f"{label} (마커: {marker!r})", words, [f"context:{marker}"],
                 )
 
-    # 5) 추출기 경고 수집 — 단독으로는 실패가 아니다.
+    # 6) 추출기 경고 수집 — 단독으로는 실패가 아니다.
     warnings = [w for w in EXTRACTOR_WARNINGS if w in body]
     if warnings:
         signals.extend(f"warning:{w}" for w in warnings)
 
-    # 6) 경고 + 임계치 미달 → 실패로 승격.
+    # 7) 경고 + 임계치 미달 → 실패로 승격.
     if warnings and words < threshold:
         return ValidationResult(
             FAILED, LOW_CONFIDENCE,
@@ -323,7 +381,20 @@ def validate_content(
             words, signals,
         )
 
-    # 7) 임계치 미달 — 정상 단문일 수 있어 SUSPECT 로만 표시.
+    # 8) 저가치(광고·유인) 의심 — 짧은 본문에서 서로 다른 범주가 2개 이상 맞을 때.
+    #    막지 않는다. note-maker 트리아지에 "엄격히 보라"고 전달하기 위한 신호다.
+    #    `too_short`(9) 보다 먼저 본다 — 둘 다 SUSPECT 이지만 "광고일 수 있다"가
+    #    "짧다"보다 구체적인 진단이고, 프롬프트에 더 유용한 경고를 준다.
+    if words <= LOW_VALUE_MAX_WORDS:
+        lv = low_value_signals(f"{title}\n{clean}")
+        if len(set(lv)) >= LOW_VALUE_MIN_CATEGORIES:
+            return ValidationResult(
+                SUSPECT, LOW_VALUE,
+                f"광고·유인 지표 {sorted(set(lv))} — 노트 생성 전 가치 판정 필요",
+                words, signals + [f"low_value:{c}" for c in sorted(set(lv))],
+            )
+
+    # 9) 임계치 미달 — 정상 단문일 수 있어 SUSPECT 로만 표시.
     if words < threshold:
         signals.append(f"short:{words}<{threshold}")
         return ValidationResult(
@@ -332,7 +403,7 @@ def validate_content(
             words, signals,
         )
 
-    # 8) 경고만 있고 길이는 충분 → SUSPECT.
+    # 10) 경고만 있고 길이는 충분 → SUSPECT.
     if warnings:
         return ValidationResult(
             SUSPECT, LOW_CONFIDENCE,

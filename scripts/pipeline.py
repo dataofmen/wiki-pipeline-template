@@ -161,6 +161,16 @@ def notify_telegram(ingest_results: list, note_results: list, publish_success) -
         for r in gated[:5]:
             lines.append(f"  • {r.get('source_url', '')[:70]}")
 
+    # 트리아지 미확인 보고 — classification 없는 노트가 있으면 R0 를 건너뛴 것이다.
+    tri_missing = sum(len((r.get("triage") or {}).get("missing", [])) for r in note_results)
+    tri_ad = sum(len((r.get("triage") or {}).get("ad", [])) for r in note_results)
+    if tri_missing or tri_ad:
+        lines.append("")
+        if tri_missing:
+            lines.append(f"⚠️ *트리아지 미확인 {tri_missing}개* — classification 없는 노트")
+        if tri_ad:
+            lines.append(f"📢 *광고 분류 {tri_ad}개* — 퍼블리시 제외 확인 필요")
+
     # 링크 건강: 기준선보다 악화된 경우에만 보고한다. 정상일 때 조용해야 신호가 산다.
     try:
         sys.path.insert(0, str(SCRIPTS_DIR))
@@ -788,6 +798,40 @@ def _cli_excerpt(stdout: str = "", stderr: str = "", limit: int = 500) -> str:
     return detail[:limit]
 
 
+def _audit_triage(clipping_stem: str, saved_files: list[str]) -> dict:
+    """생성된 노트가 R0 트리아지를 실제로 거쳤는지 검사한다.
+
+    CLASSIFY 는 프롬프트 지시문이므로 LLM 이 조용히 건너뛸 수 있다. VERIFY 는 코드가
+    파일에 `status: fetch_failed` 를 쓰고 코드가 검사하지만, CLASSIFY 에는 그런 흔적이
+    없었다 — 규칙을 넣은 뒤에도 `classification` 필드를 가진 노트가 볼트 전체에 0개였다.
+    `classification` 을 필수 필드로 두고 생성 직후 검사해, 건너뜀을 **관측 가능**하게 만든다.
+
+    반환: {"classified": n, "missing": [파일...], "ad": [파일...]}
+    """
+    classified, missing, ad = 0, [], []
+    for rel in saved_files:
+        path = PROJECT_DIR / rel
+        try:
+            head = path.read_text(encoding="utf-8", errors="replace")[:2500]
+        except Exception:
+            continue
+        m = re.search(r"^classification:\s*[\"']?(\w+)", head, re.MULTILINE)
+        if not m:
+            missing.append(rel)
+            continue
+        classified += 1
+        if m.group(1).lower() == "ad":
+            ad.append(rel)
+    if missing:
+        logger.warning(
+            f"[{clipping_stem}] 트리아지 미확인 — classification 없는 노트 "
+            f"{len(missing)}/{len(saved_files)}개: {missing[:3]}"
+        )
+    if ad:
+        logger.warning(f"[{clipping_stem}] 광고로 분류된 노트 {len(ad)}개 (퍼블리시 제외 대상): {ad}")
+    return {"classified": classified, "missing": missing, "ad": ad}
+
+
 def phase_note_make(clippings: list[dict], timeout: int = 3600) -> list[dict]:
     """Phase 4: Generate notes using the Claude Code CLI (`claude -p`).
 
@@ -906,7 +950,16 @@ def phase_note_make(clippings: list[dict], timeout: int = 3600) -> list[dict]:
         # 검증 경고가 있으면 프롬프트에 명시해 환각을 억제한다.
         v = c.get("validation") or {}
         warning_block = ""
-        if v.get("verdict") and v["verdict"] != "ok":
+        if v.get("code") == "low_value":
+            warning_block = f"""
+[가치 경고 — 트리아지를 특히 엄격히 하라]
+기계적 검사에서 광고·유인 지표가 감지됐다: {v.get('reason')}
+이 클리핑은 본문 자체는 정상이지만 **광고·리딩방 유인·낚시**일 가능성이 있다.
+- 재현 가능한 절차·검증 가능한 데이터가 없고 성과 자랑과 유인만 있으면 **노트를 만들지 마라.**
+- 옮길 알맹이가 실제로 있으면 garden 1개로 제한하고 `classification: ad` 를 남겨라.
+- 기계 신호는 판정이 아니다. 본문을 읽고 네가 판단하라.
+"""
+        elif v.get("verdict") and v["verdict"] != "ok":
             warning_block = f"""
 [본문 신뢰도 경고 — 반드시 준수]
 이 클리핑은 검증에서 `{v.get('code')}` 로 표시됐다: {v.get('reason')}
@@ -926,6 +979,9 @@ def phase_note_make(clippings: list[dict], timeout: int = 3600) -> list[dict]:
 - 프론트매터가 `status: fetch_failed` 이거나 본문이 에러/로그인/CAPTCHA 화면이면 → 노트를 만들지 말고 사유를 출력하고 종료.
 - 광고·스팸(자기홍보가 핵심 의도, 수익 자랑으로 신뢰를 만들고 방법은 없음, 링크 덤프)이면 → 노트를 만들지 말거나, 옮길 알맹이가 있을 때만 garden 1개로 제한하고 `classification: ad` 를 남긴다.
 - 유용하면 → `classification: useful` + `classification_reason` 한 줄을 모든 노트 프론트매터에 넣고 진행.
+
+**`classification` 은 필수 필드다.** 생성한 모든 노트에 반드시 넣어라. 파이프라인이
+생성 직후 이 필드를 검사하며, 없으면 트리아지를 건너뛴 것으로 기록된다.
 {warning_block}
 [해야 할 일]
 1. clipping 원문과 note-format.md 를 읽는다.
@@ -1019,10 +1075,12 @@ def phase_note_make(clippings: list[dict], timeout: int = 3600) -> list[dict]:
         if saved_files:
             for f in saved_files:
                 logger.info(f"[{clipping_stem}] -> Saved {f}")
+            triage = _audit_triage(clipping_stem, saved_files)
             return {
                 "clipping_path": str(clipping_path),
                 "generated_files": saved_files,
                 "status": "success",
+                "triage": triage,
             }
         if cli_detail:
             logger.info(f"[{clipping_stem}] claude output without generated notes: {cli_detail}")
