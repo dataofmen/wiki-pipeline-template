@@ -396,40 +396,97 @@ def _normalize_url_for_dedup(url: str) -> str:
         p = urlparse(url)
         TRACKING = {"si", "utm_source", "utm_medium", "utm_campaign",
                     "utm_term", "utm_content", "fbclid", "gclid", "ref"}
+        # X/Twitter 는 공유 출처를 `?s=`·`?t=` 로 붙인다. 같은 트윗이 s=52 / s=20 /
+        # 파라미터 없음으로 각각 다른 URL 취급되어 재클립되던 원인이다.
+        # 전역으로 `s` 를 지우면 WordPress 검색(`?s=검색어`)을 깨뜨리므로 도메인 한정.
+        host = (p.netloc or "").lower()
+        if "x.com" in host or "twitter.com" in host:
+            TRACKING = TRACKING | {"s", "t"}
         qs = [(k, v) for k, v in parse_qsl(p.query) if k not in TRACKING]
         return p._replace(query=urlencode(qs), fragment="").geturl().rstrip("/")
     except Exception:
         return url.rstrip("/")
 
-def find_existing_clipping(url: str, output_dir: Path) -> Path | None:
-    """Return path to existing clipping with same normalized URL, or None."""
-    target = _normalize_url_for_dedup(url)
-    failure_markers = [
-        "[스레드 추출 실패",
-        "[fetch failed]",
-        "[원문 추출 실패]",
-        "The request could not be satisfied",
-        "Warning: Target URL returned error",
-        "Request blocked",
-        "403 Forbidden",
-        "403 ERROR",
-        "cloudfront (CloudFront)",
-    ]
-    for cf in output_dir.glob("*.md"):
+def content_fingerprint(text: str) -> str:
+    """본문의 정규화 해시. 같은 로컬 파일이 다른 이름으로 재클립되는 것을 잡는다.
+
+    URL 이 없는 소스(로컬 .txt/PDF/이미지)는 URL dedup 이 통하지 않는다.
+    (실측: inbox/texts/…telegram-media-bundle.txt 가 08-25/08-26/08-27 3회 재클립됨)
+    """
+    import hashlib
+    from content_validation import extract_body
+    body = extract_body(text or "")
+    # 공백 차이는 무시한다
+    normalized = " ".join(body.split())
+    if len(normalized) < 40:
+        return ""
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def _iter_clippings(output_dir: Path):
+    """`_quarantine` 하위까지 포함해 클리핑을 순회한다.
+
+    평면 glob("*.md") 만 보면 격리된 클리핑이 dedup 대상에서 빠져 같은 URL 이 계속
+    재클립된다. 실측: 동일 Medium URL 이 3회 클립되고(_quarantine 에 8건 더) 같은
+    주제 노트가 약 40개로 늘어났으며 openai-deployment-company 엔티티가 4개 중복됐다.
+    """
+    seen = set()
+    for cf in sorted(output_dir.rglob("*.md")):
+        if cf.name == "index.md":
+            continue
+        r = cf.resolve()
+        if r in seen:
+            continue
+        seen.add(r)
+        yield cf
+
+
+def _is_valid_prior_clipping(content: str, path: Path) -> bool:
+    """이 클리핑을 "이미 확보한 원문" 으로 인정할지.
+
+    추출 실패분은 인정하지 않는다 — 지금은 원문을 받을 수 있을지 모르므로 재시도를
+    허용해야 한다. 판정은 content_validation(SSOT)에 위임한다.
+    """
+    from content_validation import validate_content
+    import re as _re
+    m = _re.search(r"^status:\s*[\"']?([\w-]+)", content[:1500], _re.MULTILINE)
+    status = m.group(1) if m else ""
+    if status == "fetch_failed":
+        return False
+    m = _re.search(r"^source_type:\s*[\"']?([\w-]+)", content[:1500], _re.MULTILINE)
+    stype = m.group(1) if m else "url"
+    return not validate_content(content, source_type=stype).failed
+
+
+def find_existing_clipping(url: str, output_dir: Path,
+                           content: str | None = None) -> Path | None:
+    """같은 원문의 기존 클리핑 경로. 없으면 None.
+
+    URL 정규화 일치 또는 본문 지문 일치로 판정하며, `_quarantine` 하위도 본다.
+    추출 실패한 기존 클리핑은 무시해 재시도를 허용한다.
+    """
+    target = _normalize_url_for_dedup(url) if url else ""
+    fingerprint = content_fingerprint(content) if content else ""
+
+    for cf in _iter_clippings(output_dir):
         try:
-            content = cf.read_text(errors="ignore")
-            # Skip if failed clipping
-            if any(marker in content for marker in failure_markers) or len(content.strip()) < 150:
-                continue
-            for line in content.split("\n"):
+            existing_content = cf.read_text(errors="ignore")
+        except Exception:
+            continue
+        if not _is_valid_prior_clipping(existing_content, cf):
+            continue
+
+        if target:
+            for line in existing_content.split("\n"):
                 if line.startswith("source_url:"):
                     existing = _normalize_url_for_dedup(
                         line.split("source_url:", 1)[1].strip()
                     )
-                    if existing == target:
+                    if existing and existing == target:
                         return cf
                     break
-        except Exception:
-            pass
-    return None
 
+        if fingerprint and content_fingerprint(existing_content) == fingerprint:
+            return cf
+
+    return None

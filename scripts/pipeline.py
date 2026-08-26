@@ -503,6 +503,22 @@ def phase_ingest(pending: list[dict]) -> list[dict]:
                 if lines and lines[0].strip().startswith("http"):
                     content = "\n".join(lines[1:]).strip()
 
+                # Dedup: 로컬 파일은 URL 이 없어 URL dedup 이 통하지 않는다. 본문
+                # 지문으로 확인한다. (실측: 동일 .txt 가 08-25/08-26/08-27 3회 재클립)
+                from fetcher_bridge import find_existing_clipping
+                dup = find_existing_clipping(source_url or "", CLIPPINGS_DIR, content=content)
+                if dup:
+                    logger.info(f"Dedup: 동일 본문 클리핑 재사용 {dup.name} ({inbox_path})")
+                    meta_path = Path(inbox_path).with_name(Path(inbox_path).name + ".meta.yaml")
+                    _mark_inbox_processed(str(meta_path) if meta_path.exists() else inbox_path)
+                    results.append({
+                        "source_url": source_url or inbox_path,
+                        "clipping_path": str(dup),
+                        "status": "duplicate",
+                        "domain_hint": domain_hint,
+                    })
+                    continue
+
                 clipping_path = format_clipping(
                     source_url or inbox_path, title, content,
                     "text-file", "text", domain_hint, CLIPPINGS_DIR,
