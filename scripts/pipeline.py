@@ -100,6 +100,17 @@ def _publish_label(publish_success) -> tuple[str, str]:
 
 def notify_telegram(ingest_results: list, note_results: list, publish_success) -> bool:
     """Send pipeline completion summary to Telegram."""
+    successful_clips = len([r for r in ingest_results if r.get("status") == "success"])
+    notes_created = len(note_results)
+    
+    # A run is a no-op if:
+    # 1. No items were successfully ingested AND no notes were created
+    # 2. AND the publish step didn't actually fail (it either succeeded or was skipped)
+    # This prevents "0 items processed" noise while still alerting on actual publish failures.
+    if successful_clips == 0 and notes_created == 0 and publish_success is not False:
+        logger.info("No-op pipeline run (no new clips or notes) — skipping Telegram notification")
+        return True
+
     try:
         import requests as _requests
     except ImportError:
@@ -141,6 +152,24 @@ def notify_telegram(ingest_results: list, note_results: list, publish_success) -
             lines.append(f"• [{title}]({url})")
         if len(note_results) > 10:
             lines.append(f"  _외 {len(note_results) - 10}개…_")
+
+    # VERIFY 게이트에서 걸러진 클리핑을 보고한다(조용히 사라지면 재추출 기회를 놓친다).
+    gated = [r for r in ingest_results if r.get("status") == "fetch_failed"]
+    if gated:
+        lines.append("")
+        lines.append(f"🚫 *본문 검증 실패 {len(gated)}건* — 재추출 필요")
+        for r in gated[:5]:
+            lines.append(f"  • {r.get('source_url', '')[:70]}")
+
+    # Tier-0 알림 큐: 콘텐츠 안의 시한성 정보
+    try:
+        from alerts import format_for_notification
+        alert_block = format_for_notification()
+    except Exception as e:
+        logger.warning(f"알림 큐 조회 실패: {e}")
+        alert_block = ""
+    if alert_block:
+        lines += ["", alert_block]
 
     lines += ["", f"🔗 [{SITE_BASE_URL}]({SITE_BASE_URL})"]
 
@@ -218,39 +247,34 @@ def _normalize_url(url: str) -> str:
 
 
 def _is_empty_clipping(path: str) -> bool:
-    """Check if a clipping file is empty/failed (no real content)."""
+    """클리핑에 실제 본문이 없는지 판정. content_validation 이 SSOT 다.
+
+    FAILED 만 True 로 본다. SUSPECT(짧지만 정상일 수 있는 단문)는 통과시키고
+    노트 생성 프롬프트에서 보수적으로 다루게 한다.
+    """
+    from content_validation import validate_clipping_file
     try:
-        content = Path(path).read_text(errors="ignore")
-        # Failed extraction markers
-        failure_markers = [
-            "[스레드 추출 실패",
-            "[스레드 추출 실패 — 수동 처리 필요]",
-            "[원문 추출 실패]",
-            "[PDF 추출 실패]",
-            "[PDF 추출 실패 — 수동 처리 필요]",
-            "[fetch failed]",
-            "The request could not be satisfied",
-            "Warning: Target URL returned error",
-            "Request blocked",
-            "403 Forbidden",
-            "403 ERROR",
-            "cloudfront (CloudFront)",
-            "권혁민님, 무슨 생각을 하고 계신가요?",
-        ]
-        if any(marker in content for marker in failure_markers):
-            return True
-        # Check if body is essentially empty (front matter only)
-        parts = content.split("---", 2)
-        if len(parts) >= 3:
-            body = parts[2].strip()
-            # Remove source URL references
-            lines = [l for l in body.split("\n") if not l.startswith("원본:") and not l.startswith("*원문")]
-            body_text = "\n".join(lines).strip()
-            if len(body_text) < 50:  # Less than 50 chars of actual content
-                return True
-        return False
+        return validate_clipping_file(path).failed
     except Exception:
         return True
+
+
+def _clipping_validation(path: str):
+    """클리핑 검증 결과를 그대로 반환(경고 문구를 프롬프트에 실을 때 사용)."""
+    from content_validation import validate_clipping_file, ValidationResult, FAILED, EMPTY
+    try:
+        return validate_clipping_file(path)
+    except Exception as e:
+        return ValidationResult(FAILED, EMPTY, f"검증 실패: {e}", 0, [])
+
+
+def _clipping_marked_failed(path: str) -> bool:
+    """프론트매터가 이미 `status: fetch_failed` 로 표시된 클리핑인지."""
+    try:
+        head = Path(path).read_text(errors="ignore")[:1200]
+        return bool(re.search(r"^status:\s*[\"']?fetch_failed", head, re.MULTILINE))
+    except Exception:
+        return False
 
 
 def _get_already_clipped_urls() -> set[str]:
@@ -693,10 +717,33 @@ def _resolve_codex_bin() -> str | None:
 
 def _resolve_claude_bin() -> str | None:
     """Resolve the `claude` (Claude Code) CLI binary, augmenting PATH for launchd daemons."""
+    override = os.environ.get("PIPELINE_CLAUDE_BIN")
+    if override:
+        return override if Path(override).exists() else None
     local_bin = str(Path.home() / ".local" / "bin")
     brew_bin = "/opt/homebrew/bin"
     search_path = f"{local_bin}:{brew_bin}:/usr/local/bin:{os.environ.get('PATH', '/usr/bin:/bin')}"
     return shutil.which("claude", path=search_path)
+
+
+def _is_claude_capacity_error(detail: str) -> bool:
+    """Return True for Claude CLI/runtime failures that code repair cannot fix."""
+    text = (detail or "").lower()
+    capacity_markers = [
+        "weekly limit",
+        "usage limit",
+        "rate limit",
+        "quota",
+        "resets ",
+        "not authenticated",
+        "authentication",
+        "login",
+        "oauth session expired",
+        "sessionend hook",
+        "hook cancelled",
+        "hook failed",
+    ]
+    return any(marker in text for marker in capacity_markers)
 
 
 def phase_note_make(clippings: list[dict], timeout: int = 3600) -> list[dict]:
@@ -711,11 +758,27 @@ def phase_note_make(clippings: list[dict], timeout: int = 3600) -> list[dict]:
     logger.info(f"=== Phase 4: Note Maker ({len(clippings)} clippings) ===")
 
     successful_clippings = [c for c in clippings if c.get("status") == "success" and c.get("clipping_path")]
-    # Filter out empty/failed clippings
-    valid_clippings = [c for c in successful_clippings if not _is_empty_clipping(c["clipping_path"])]
+    # VERIFY 게이트 — 본문이 아닌 클리핑은 노트 생성에서 제외한다. 프론트매터가
+    # 이미 fetch_failed 로 표시된 것과, 지금 검증에서 FAILED 로 판정된 것 모두 제외.
+    # (에러 페이지 1건이 환각 노트 5개를 만든 사고를 막는 지점)
+    valid_clippings = []
+    for c in successful_clippings:
+        cpath = c["clipping_path"]
+        if _clipping_marked_failed(cpath):
+            logger.warning(f"Skip (status: fetch_failed): {Path(cpath).name}")
+            continue
+        v = _clipping_validation(cpath)
+        if v.failed:
+            logger.warning(f"Skip (검증 실패 {v.code}): {Path(cpath).name} — {v.reason}")
+            continue
+        if v.verdict != "ok":
+            logger.warning(f"주의 ({v.code}): {Path(cpath).name} — {v.reason}")
+        c["validation"] = {"verdict": v.verdict, "code": v.code, "reason": v.reason,
+                           "word_count": v.word_count}
+        valid_clippings.append(c)
     skipped = len(successful_clippings) - len(valid_clippings)
     if skipped:
-        logger.warning(f"Skipping {skipped} empty/failed clippings")
+        logger.warning(f"Skipping {skipped} invalid clippings (VERIFY 게이트)")
         
     # Single source of truth for "already processed": a clipping is done iff a
     # note on disk references it via source_clipping. Notes are ground truth, so
@@ -762,24 +825,66 @@ def phase_note_make(clippings: list[dict], timeout: int = 3600) -> list[dict]:
     codex_env["PATH"] = ":".join([*codex_path_parts, existing_path])
     codex_env.setdefault("HOME", str(Path.home()))
 
-    logger.info(f"Note generation via Claude Code CLI: {claude_bin}")
+    # Claude Code keeps shared state under ~/.claude; concurrent headless runs
+    # have been observed to exit early with no stderr. Keep the default serial,
+    # while still allowing an explicit opt-in for backlog jobs.
+    max_workers = max(1, int(os.environ.get("PIPELINE_NOTE_WORKERS", "1")))
+    logger.info(f"Note generation via Claude Code CLI: {claude_bin} (workers: {max_workers})")
     logger.info(f"Note-maker PATH begins with: {':'.join(codex_path_parts[:4])}")
-    results = []
+    phase_start = time.time()
 
-    def _note_snapshot() -> set:
-        return set(WIKI_DIR.glob("**/*.md")) | set(GARDEN_DIR.glob("**/*.md"))
+    def _attribute_new_notes(clipping_stem: str) -> list[str]:
+        """Find the notes generated for this clipping. Under parallel workers a
+        global before/after snapshot would swallow sibling workers' files, so
+        ownership is determined by the source_clipping frontmatter every note
+        must carry (stems are unique per clipping)."""
+        from pipeline_state import SOURCE_CLIPPING_RE
+        saved = []
+        for root in (WIKI_DIR, GARDEN_DIR):
+            for p in root.glob("**/*.md"):
+                try:
+                    if p.stat().st_mtime < phase_start - 1:
+                        continue
+                    m = SOURCE_CLIPPING_RE.search(p.read_text(encoding="utf-8", errors="ignore"))
+                except Exception:
+                    continue
+                if m and re.sub(r"\.md$", "", m.group(1).strip()) == clipping_stem:
+                    try:
+                        p.write_text(_dedup_frontmatter(p.read_text()))
+                    except Exception:
+                        pass
+                    saved.append(str(p.relative_to(PROJECT_DIR)))
+        return sorted(saved)
 
-    for idx, c in enumerate(successful_clippings):
+    def _process_one(c: dict) -> dict:
         clipping_path = c['clipping_path']
         clipping_stem = Path(clipping_path).stem
-        domain_hint = c.get('domain_hint', 'general')
-        logger.info(f"Processing clipping {idx+1}/{len(successful_clippings)}: {clipping_path}")
+        logger.info(f"[{clipping_stem}] Processing clipping: {clipping_path}")
+
+        # 검증 경고가 있으면 프롬프트에 명시해 환각을 억제한다.
+        v = c.get("validation") or {}
+        warning_block = ""
+        if v.get("verdict") and v["verdict"] != "ok":
+            warning_block = f"""
+[본문 신뢰도 경고 — 반드시 준수]
+이 클리핑은 검증에서 `{v.get('code')}` 로 표시됐다: {v.get('reason')}
+본문이 {v.get('word_count')}단어뿐이다. 따라서:
+- **원문에 명시된 내용만 쓴다.** URL 슬러그·제목·도메인명으로 내용을 추론해 채우지 마라.
+- 노트 개수를 최소로 한다 (wiki 1개, garden 최대 1개).
+- 근거가 부족해 노트를 만들 수 없다고 판단되면, 노트를 만들지 말고 그 사유를 출력하라.
+"""
 
         prompt = f"""너는 note-maker 에이전트다. @.claude/agents/note-maker.md 와 규칙 파일 @{format_file_rel} 를 먼저 읽고, 그 규칙을 엄격히 준수하라.
 
 다음 clipping 파일을 6 Rs 파이프라인(R1 Reduce → R2 Reflect → R3 Reweave → R4 Record → R5 Verify)으로 처리하라:
   @{clipping_path}
 
+[0단계 — 트리아지 (R1 보다 먼저)]
+@.claude/skills/note-pipeline/references/content-triage.md 를 읽고 판정하라.
+- 프론트매터가 `status: fetch_failed` 이거나 본문이 에러/로그인/CAPTCHA 화면이면 → 노트를 만들지 말고 사유를 출력하고 종료.
+- 광고·스팸(자기홍보가 핵심 의도, 수익 자랑으로 신뢰를 만들고 방법은 없음, 링크 덤프)이면 → 노트를 만들지 말거나, 옮길 알맹이가 있을 때만 garden 1개로 제한하고 `classification: ad` 를 남긴다.
+- 유용하면 → `classification: useful` + `classification_reason` 한 줄을 모든 노트 프론트매터에 넣고 진행.
+{warning_block}
 [해야 할 일]
 1. clipping 원문과 note-format.md 를 읽는다.
 2. 기존 wiki/·garden/ 노트를 탐색해 연결점을 찾는다(R2). 단순 요약을 넘어 숨은 의도·맥락 연결·전문가 수준의 통찰을 도출하라.
@@ -796,10 +901,13 @@ def phase_note_make(clippings: list[dict], timeout: int = 3600) -> list[dict]:
 - 위키링크는 순수 슬러그만 사용: `[[슬러그]]`. path-prefixed(`[[concepts/슬러그]]`) 금지.
 - note-format.md 의 검증 체크리스트를 통과시켜라.
 - 확인을 되묻지 말고 바로 작업을 완료하라.
+- **원문에 없는 사실·수치·인용을 만들지 마라.** 근거는 반드시 클리핑 본문에서 온 것이어야 한다.
+  (사고 사례: Medium 500 에러 페이지에서 URL 슬러그만 보고 개념 노트 5개가 환각 생성됐다)
+- 원문에 명시된 시한성 정보(만료일·마감일·보안 이슈)가 있으면
+  `python3 scripts/alerts.py add "<요약>" --category <security|account_expiry|project_risk|deadline> --source {clipping_stem}` 를 실행하라. 날짜를 추측하지 마라.
 """
 
-        before = _note_snapshot()
-        logger.info(f"Invoking Claude Code CLI (claude -p) for {Path(clipping_path).name}...")
+        logger.info(f"[{clipping_stem}] Invoking Claude Code CLI (claude -p)...")
         per_call_timeout = min(timeout, 1800)  # 30 min max per clipping
         poll_interval = 10  # seconds between progress logs
 
@@ -834,56 +942,68 @@ def phase_note_make(clippings: list[dict], timeout: int = 3600) -> list[dict]:
                 time.sleep(poll_interval)
                 elapsed += poll_interval
                 if elapsed % 60 == 0:  # log every minute
-                    logger.info(f"  Claude still running for {clipping_stem} ({elapsed}s elapsed)")
+                    logger.info(f"[{clipping_stem}] Claude still running ({elapsed}s elapsed)")
 
             stdout, stderr = proc.communicate(timeout=10)
             if proc.returncode != 0:
+                detail = (stderr or stdout or "").strip()
                 logger.error(
-                    f"claude -p exited {proc.returncode} for {clipping_stem}: "
-                    f"{(stderr or '')[:300]}"
+                    f"[{clipping_stem}] claude -p exited {proc.returncode}: "
+                    f"{detail[:500]}"
                 )
+                if _is_claude_capacity_error(detail):
+                    return {
+                        "clipping_path": str(clipping_path),
+                        "generated_files": [],
+                        "status": "deferred",
+                        "error": detail[:500],
+                    }
         except subprocess.TimeoutExpired:
-            logger.error(f"claude -p timed out after {per_call_timeout}s for {clipping_stem}")
-            results.append({"clipping_path": str(clipping_path), "status": "error", "error": "timeout"})
-            continue
+            logger.error(f"[{clipping_stem}] claude -p timed out after {per_call_timeout}s")
+            return {"clipping_path": str(clipping_path), "status": "error", "error": "timeout"}
         except Exception as e:
-            logger.error(f"claude -p crashed for {clipping_stem}: {e}")
-            results.append({"clipping_path": str(clipping_path), "status": "error", "error": str(e)})
-            continue
+            logger.error(f"[{clipping_stem}] claude -p crashed: {e}")
+            return {"clipping_path": str(clipping_path), "status": "error", "error": str(e)}
 
-        # Detect newly created note files; sanitize duplicate frontmatter keys.
-        new_paths = sorted(_note_snapshot() - before)
-        saved_files = []
-        for p in new_paths:
-            try:
-                p.write_text(_dedup_frontmatter(p.read_text()))
-            except Exception:
-                pass
-            saved_files.append(str(p.relative_to(PROJECT_DIR)))
-
+        saved_files = _attribute_new_notes(clipping_stem)
         if saved_files:
             for f in saved_files:
-                logger.info(f"  -> Saved {f}")
-            results.append({
+                logger.info(f"[{clipping_stem}] -> Saved {f}")
+            return {
                 "clipping_path": str(clipping_path),
                 "generated_files": saved_files,
                 "status": "success",
-            })
-            for done_file in (note_maker_done, master_done):
-                try:
-                    with open(done_file, "a") as fh:
-                        fh.write(json.dumps({"clipping_path": str(clipping_path), "status": "success", "generated_files": saved_files}, ensure_ascii=False) + "\n")
-                except Exception as e:
-                    logger.warning(f"Could not write done log {done_file}: {e}")
-        else:
-            logger.warning(f"No new notes created by Codex for {clipping_stem}")
-            results.append({
-                "clipping_path": str(clipping_path),
-                "generated_files": [],
-                "status": "parse_error",
-            })
+            }
+        logger.warning(f"[{clipping_stem}] No new notes with matching source_clipping found")
+        return {
+            "clipping_path": str(clipping_path),
+            "generated_files": [],
+            "status": "parse_error",
+        }
 
-    logger.info(f"Note maker completed: processed {len(results)} clippings.")
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    results = []
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = {pool.submit(_process_one, c): c for c in successful_clippings}
+        for fut in as_completed(futures):
+            try:
+                r = fut.result()
+            except Exception as e:
+                c = futures[fut]
+                logger.error(f"Note worker crashed for {c.get('clipping_path')}: {e}")
+                r = {"clipping_path": str(c.get("clipping_path", "")), "status": "error", "error": str(e)}
+            results.append(r)
+            if r.get("status") == "success":
+                # Done logs are written from the main thread only, so concurrent
+                # workers never interleave partial lines in the JSONL files.
+                for done_file in (note_maker_done, master_done):
+                    try:
+                        with open(done_file, "a") as fh:
+                            fh.write(json.dumps({"clipping_path": r["clipping_path"], "status": "success", "generated_files": r["generated_files"]}, ensure_ascii=False) + "\n")
+                    except Exception as e:
+                        logger.warning(f"Could not write done log {done_file}: {e}")
+
+    logger.info(f"Note maker completed: processed {len(results)} clippings ({max_workers} workers).")
     return results
 
 
@@ -1084,12 +1204,15 @@ def phase_report(ingest_results: list, note_results: list, publish_success, diag
     notes_created = len(note_results)
     notes_ok = len([r for r in note_results if r.get("status") == "success"])
     notes_fail = len([r for r in note_results if r.get("status") in ("error", "parse_error", "timeout")])
+    notes_deferred = len([r for r in note_results if r.get("status") == "deferred"])
     _, publish_text = _publish_label(publish_success)
 
     # Overall health: a run is failed if publish failed, or notes were attempted
-    # but none succeeded. This drives the status marker + failure alert.
+    # but none succeeded for a repairable reason. Claude account/capacity
+    # limits are deferred work, not pipeline code defects, so they should not
+    # trigger Telegram-agent self-repair.
     pub_failed = publish_success is False
-    notegen_failed = notes_created > 0 and notes_ok == 0
+    notegen_failed = notes_created > 0 and notes_ok == 0 and notes_deferred != notes_created
     ok = not (pub_failed or notegen_failed)
     status_marker = "✅ 성공" if ok else "❌ 실패"
     duration_txt = f"{run_duration:.0f}s" if run_duration else "n/a"
@@ -1099,7 +1222,7 @@ def phase_report(ingest_results: list, note_results: list, publish_success, diag
 {'=' * 50}
 - 수신: {len(ingest_results)}개 항목
 - 클리핑: {successful_clips}개 완료 / {failed_clips}개 실패
-- 노트 생성: {notes_created}개 (성공 {notes_ok} / 실패 {notes_fail})
+- 노트 생성: {notes_created}개 (성공 {notes_ok} / 실패 {notes_fail} / 지연 {notes_deferred})
 - 퍼블리시: {publish_text}
 - 사이트: {SITE_BASE_URL}/
 
@@ -1142,13 +1265,28 @@ def main():
     lock_fd = None
     if not args.dry_run:
         import fcntl
-        try:
-            LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
-            lock_fd = open(LOCK_FILE, "a")
-            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
-            logger.error("Pipeline is already running (lock file active). Exiting.")
-            sys.exit(1)
+        LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
+        lock_fd = open(LOCK_FILE, "a")
+        # Wait for the lock instead of hard-failing: rapid-fire Telegram events
+        # legitimately start overlapping runs, and an immediate exit(1) here used
+        # to be misread as a pipeline bug (triggering pointless self-repair).
+        lock_wait = int(os.environ.get("PIPELINE_LOCK_WAIT", "1800"))
+        deadline = time.time() + lock_wait
+        waiting_logged = False
+        while True:
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError:
+                if time.time() >= deadline:
+                    logger.error(f"Pipeline lock still held after {lock_wait}s — giving up (exit 3).")
+                    sys.exit(3)
+                if not waiting_logged:
+                    logger.info(f"Pipeline already running — waiting up to {lock_wait}s for the lock...")
+                    waiting_logged = True
+                time.sleep(5)
+        if waiting_logged:
+            logger.info("Pipeline lock acquired after waiting.")
 
     try:
         run_start = time.time()
@@ -1185,24 +1323,33 @@ def main():
             if args.dry_run:
                 print(f"[DRY RUN] Would invoke Codex CLI for note generation")
             else:
-                # Use ingestor_done.jsonl if available
-                done_file = WORKSPACE_DIR / "ingestor_done.jsonl"
-                if done_file.exists():
-                    with open(done_file) as f:
-                        clippings = [json.loads(line.strip()) for line in f]
-                else:
+                if 3 in phases:
+                    # A Telegram-triggered 3-7 run should process only clippings
+                    # created in this run. If Phase 3 found nothing (often because
+                    # the URL was already clipped), do not drag stale backlog into
+                    # the run and mark the Telegram workflow as failed.
                     clippings = list(ingest_results)
-                    
-                # Scan clippings directory and merge any files not in current list
-                existing_paths = {Path(c["clipping_path"]).resolve() for c in clippings if c.get("clipping_path")}
-                CLIPPINGS_DIR.mkdir(parents=True, exist_ok=True)
-                for f in CLIPPINGS_DIR.glob("*.md"):
-                    if f.resolve() not in existing_paths:
-                        clippings.append({
-                            "clipping_path": str(f.relative_to(PROJECT_DIR)),
-                            "status": "success",
-                            "domain_hint": "general"
-                        })
+                    if not clippings:
+                        logger.info("Phase 3 produced no new clippings; skipping Phase 4 backlog scan for this run")
+                else:
+                    # Explicit Phase 4/backlog runs may process all unprocessed
+                    # clippings on disk.
+                    done_file = WORKSPACE_DIR / "ingestor_done.jsonl"
+                    if done_file.exists():
+                        with open(done_file) as f:
+                            clippings = [json.loads(line.strip()) for line in f]
+                    else:
+                        clippings = []
+
+                    existing_paths = {Path(c["clipping_path"]).resolve() for c in clippings if c.get("clipping_path")}
+                    CLIPPINGS_DIR.mkdir(parents=True, exist_ok=True)
+                    for f in CLIPPINGS_DIR.glob("*.md"):
+                        if f.resolve() not in existing_paths:
+                            clippings.append({
+                                "clipping_path": str(f.relative_to(PROJECT_DIR)),
+                                "status": "success",
+                                "domain_hint": "general"
+                            })
 
                 if clippings:
                     note_results = phase_note_make(clippings, timeout=args.timeout)

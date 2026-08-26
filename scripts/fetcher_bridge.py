@@ -48,7 +48,13 @@ from fetchers.utils import (
 # yt-dlp binary (search PATH then common Homebrew location)
 YT_DLP = shutil.which("yt-dlp") or "/opt/homebrew/bin/yt-dlp"
 
-UF_VENV_PYTHON = str(Path.home() / "Projects" / "ultimate-fetcher" / ".venv" / "bin" / "python3")
+# 직접 import 가 불가능할 때의 폴백 subprocess python.
+# 템플릿은 사용자의 디렉터리 구조를 가정할 수 없으므로 후보를 순회한다.
+_UF_VENV_PYTHON_CANDIDATES = [
+    Path.home() / "Projects" / "ultimate-fetcher" / ".venv" / "bin" / "python3",
+    Path("/usr/local/bin/python3"),
+]
+UF_VENV_PYTHON = next((str(p) for p in _UF_VENV_PYTHON_CANDIDATES if p.exists()), "python3")
 
 
 

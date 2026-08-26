@@ -1,6 +1,6 @@
 ---
 name: note-pipeline
-description: 6 Rs 노트 생성 파이프라인. clipping 원문을 받아 Karpathy LLM Wiki + Ars Contexta 방식으로 구조화된 지식 노트를 생성한다. "노트 만들어", "이거 정리해줘", "위키에 추가", "clipping 처리", "6 Rs 실행" 요청 시 사용. 단일 파일 처리와 배치 처리 모두 지원한다.
+description: 6 Rs 노트 생성 파이프라인. clipping 원문을 받아 Karpathy LLM Wiki + Ars Contexta 방식으로 구조화된 지식 노트를 생성한다. "노트 만들어", "이거 정리해줘", "위키에 추가", "clipping 처리", "6 Rs 실행" 요청 시 사용. 단일 파일 처리와 배치 처리 모두 지원.
 ---
 
 # Note Pipeline — 6 Rs 노트 생성 스킬
@@ -14,12 +14,28 @@ description: 6 Rs 노트 생성 파이프라인. clipping 원문을 받아 Karpa
 ## 처리 흐름
 
 ```
-clipping 파일 → R1 Reduce → R2 Reflect → R3 Reweave → R4 Record → R5 Verify
+clipping 파일 → R0 트리아지 → R1 Reduce → R2 Reflect → R3 Reweave → R4 Record → R5 Verify
 ```
 
 각 R 단계는 별도 프롬프트로 처리 (LLM 어텐션 분산 방지).
 
 **노트 포맷 및 검증 체크리스트: `references/note-format.md` 를 반드시 읽고 따른다.**
+**가치 판정 및 환각 방지: `references/content-triage.md` 를 R1 보다 먼저 읽고 따른다.**
+
+## R0: 트리아지 — 게이트 (R1 앞에 무조건 실행)
+
+`references/content-triage.md` 의 판정 절차를 따른다. 요약:
+
+1. **본문 신뢰도** — 프론트매터 `status: fetch_failed` 이거나 본문이 에러/로그인/CAPTCHA
+   화면이면 **노트를 만들지 않는다.** `content_warning` 이 있으면 원문에 명시된 것만 쓰고
+   노트 수를 최소로 한다.
+2. **광고/유용 분류** — 광고·스팸이면 노트를 만들지 않거나 garden 1개로 제한하고
+   `classification: ad` 를 남긴다. 클리핑 파일은 지우지 않는다.
+3. **시한성 정보** — 만료일·마감일·보안 이슈가 명시돼 있으면
+   `python3 scripts/alerts.py add "<요약>" --category <카테고리> --source <슬러그>`.
+
+**절대 금지**: URL 슬러그·제목·도메인명만으로 내용을 추론해 노트를 채우는 것.
+(사고 사례: Medium 500 에러 페이지에서 개념 노트 5개가 환각 생성됨 — 2026-06-11)
 
 ## R1: Reduce — 통찰 추출 프롬프트
 

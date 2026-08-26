@@ -20,11 +20,28 @@ WIKILINK_RE = re.compile(r"\[\[([^\]|#]+?)(?:[|#][^\]]*?)?\]\]")
 WIKI_ROOT = Path(__file__).parent.parent
 
 # 검사에서 제외할 디렉토리
-EXCLUDE_DIRS = {"_workspace", "_workspace_prev", "inbox", "raw", ".claude", ".obsidian", ".omc"}
+# `_quarantine` 은 scripts/sync_content.sh 의 rsync 에서 제외되므로 배포 사이트에
+# 존재하지 않는다. 링크 검사도 같은 기준을 써야 "격리했는데 링크는 살아 있다"는
+# 착시가 생기지 않는다.
+EXCLUDE_DIRS = {"_workspace", "_workspace_prev", "inbox", "raw", ".claude", ".obsidian", ".omc",
+                "_quarantine"}
 
 
 # 소스 디렉토리만 인덱싱 (quartz/content/ 등 복사본 제외)
 SOURCE_DIRS = ["wiki", "garden", "clippings"]
+
+
+def _iter_markdown(src_dir: Path):
+    """EXCLUDE_DIRS 를 실제로 걸러 마크다운을 순회한다.
+
+    (기존에는 EXCLUDE_DIRS 가 선언만 되고 rglob 에 적용되지 않아, 배포에서 빠지는
+     `_quarantine` 노트가 링크를 만족시키는 것으로 잡혔다 — 격리 후에도 broken link
+     가 0으로 보이는 착시의 원인.)
+    """
+    for md in src_dir.rglob("*.md"):
+        if EXCLUDE_DIRS & set(md.parts):
+            continue
+        yield md
 
 
 def build_slug_index(root: Path) -> dict[str, list[str]]:
@@ -34,7 +51,7 @@ def build_slug_index(root: Path) -> dict[str, list[str]]:
         src_dir = root / src
         if not src_dir.exists():
             continue
-        for md in src_dir.rglob("*.md"):
+        for md in _iter_markdown(src_dir):
             rel = str(md.relative_to(root).with_suffix(""))
             stem = md.stem
             index[stem].append(rel)
@@ -48,7 +65,7 @@ def build_path_set(root: Path) -> set[str]:
         src_dir = root / src
         if not src_dir.exists():
             continue
-        for md in src_dir.rglob("*.md"):
+        for md in _iter_markdown(src_dir):
             paths.add(str(md.relative_to(root).with_suffix("")))
     return paths
 
@@ -64,7 +81,7 @@ def check_links(root: Path) -> tuple[list[dict], list[dict]]:
     for d in search_dirs:
         if not d.exists():
             continue
-        for md in d.rglob("*.md"):
+        for md in _iter_markdown(d):
             content = md.read_text(encoding="utf-8", errors="replace")
             for match in WIKILINK_RE.finditer(content):
                 target = match.group(1).strip()

@@ -9,6 +9,8 @@ import json
 import base64
 import argparse
 from pathlib import Path
+
+from content_validation import validate_content
 from datetime import datetime
 
 from openai import OpenAI
@@ -100,17 +102,26 @@ def main():
     out_filename = f"{date_str}-{slug}.md"
     out_path = output_dir / out_filename
 
+    # VERIFY 게이트 — OCR/비전 추출이 빈 결과를 남기면 clipped 로 두지 않는다.
+    validation = validate_content(content, source_type="image", title=title)
+    warning_lines = ""
+    if not validation.ok:
+        warning_lines = (f'content_warning: {validation.code}\n'
+                         f'content_warning_reason: "{validation.reason}"\n')
+    status = "fetch_failed" if validation.failed else "clipped"
+
     frontmatter = f"""---
 source_url: ""
 source_type: image
 clipped_at: "{datetime.now().isoformat()}"
 title: "{title.replace('"', '')}"
 fetch_method: codex_cli
-status: clipped
+word_count: {validation.word_count}
+status: {status}
 domain_hint: general
 tags: []
 created: {datetime.now().strftime('%Y-%m-%d')}
----
+{warning_lines}---
 """
 
     output_dir.mkdir(parents=True, exist_ok=True)

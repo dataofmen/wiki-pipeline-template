@@ -6,6 +6,8 @@ import sys
 import re
 import argparse
 from pathlib import Path
+
+from content_validation import validate_content
 from datetime import datetime
 
 
@@ -79,16 +81,21 @@ def save_clipping(pdf_path: Path, title: str, content: str, output_dir: Path) ->
     filename = f"{date}-{slug}.md"
     domain_hint = detect_domain_hint(title, content)
     
-    # INLINE VALIDATION
-    if len(content.strip()) < 50:
-        print(f"Error: Extracted PDF content is too short ({len(content.strip())} chars). Rejecting extraction.", file=sys.stderr)
+    # VERIFY 게이트 — 공통 검증기로 판정한다(임계치·마커가 SSOT 에 모여 있다).
+    validation = validate_content(content, source_type="pdf", title=title)
+    if validation.failed:
+        print(f"Error: PDF 본문 검증 실패 ({validation}). 추출을 거부한다.", file=sys.stderr)
         sys.exit(1)
-        
+
     if not title or title == "0" or title == "(0)":
         print(f"Error: Extracted PDF title is invalid ('{title}'). Rejecting extraction.", file=sys.stderr)
         sys.exit(1)
-        
-    word_count = len(content.split())
+
+    word_count = validation.word_count
+    warning_lines = ""
+    if not validation.ok:
+        warning_lines = (f"content_warning: {validation.code}\n"
+                         f"content_warning_reason: \"{validation.reason}\"\n")
 
     front_matter = f"""---
 source_url: file://{pdf_path.resolve()}
@@ -101,7 +108,7 @@ fetch_method: pdf
 status: clipped
 domain_hint: {domain_hint}
 tags: []
----
+{warning_lines}---
 
 {content}
 

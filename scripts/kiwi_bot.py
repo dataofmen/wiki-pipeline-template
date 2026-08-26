@@ -9,6 +9,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 import telebot
 import subprocess
+import fcntl
 
 load_dotenv(Path(__file__).parent / ".env")
 
@@ -151,6 +152,18 @@ def trigger_telegram_agent(file_path: Path, content_type: str, sender: str) -> N
         logging.error(f"Telegram agent trigger failed: {e}")
 
 
+def pipeline_lock_active() -> bool:
+    """Return True only when another process currently holds the pipeline lock."""
+    LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with LOCK_FILE.open("a") as lock_fd:
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            return True
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+    return False
+
+
 HELP_TEXT = (
     "📥 *Hermes wiki agent*\n\n"
     "• URL → 자동 저장\n"
@@ -195,14 +208,10 @@ def handle_publish(message):
         return
     import time
     import subprocess
-    # Check if pipeline is already running
-    if LOCK_FILE.exists():
+    if pipeline_lock_active():
         lock_age = time.time() - LOCK_FILE.stat().st_mtime
-        if lock_age < 1800:
-            bot.reply_to(message, f"⚠️ 파이프라인이 이미 실행 중입니다. (진행 시간: {int(lock_age)}초)")
-            return
-        else:
-            LOCK_FILE.unlink(missing_ok=True)
+        bot.reply_to(message, f"⚠️ 파이프라인이 이미 실행 중입니다. (진행 시간: {int(lock_age)}초)")
+        return
             
     bot.reply_to(message, "🚀 수동 퍼블리시(Phase 5-6)를 트리거합니다...")
     python_bin = VENV_PYTHON if Path(VENV_PYTHON).exists() else "python3"
@@ -444,14 +453,24 @@ if __name__ == "__main__":
     # Small delay so Telegram can release any previous getUpdates session
     time.sleep(5)
 
+    conflict_count = 0
     while True:
         try:
+            started_at = time.monotonic()
             bot.polling(
                 none_stop=False,
                 interval=2,
                 timeout=30,
                 long_polling_timeout=25,
             )
+            elapsed_s = int(time.monotonic() - started_at)
+            if elapsed_s < 120:
+                conflict_count += 1
+                wait_s = min(300, 35 * conflict_count)
+                logging.warning(f"Polling stopped after {elapsed_s}s, waiting {wait_s}s before restart")
+                time.sleep(wait_s)
+            else:
+                conflict_count = 0
         except Exception as e:
             err_str = str(e)
             try:
@@ -459,9 +478,12 @@ if __name__ == "__main__":
             except Exception:
                 pass
             if "409" in err_str or "Conflict" in err_str:
-                # Another instance grabbed the session — wait and retry
-                logging.warning(f"409 conflict, waiting 35s before retry: {e}")
-                time.sleep(35)
+                # Another process or host has the bot token's getUpdates session.
+                conflict_count += 1
+                wait_s = min(300, 35 * conflict_count)
+                logging.warning(f"409 conflict, waiting {wait_s}s before retry: {e}")
+                time.sleep(wait_s)
             else:
+                conflict_count = 0
                 logging.error(f"Polling error, retrying in 5s: {e}")
                 time.sleep(5)

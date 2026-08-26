@@ -26,6 +26,10 @@ def processed_clipping_stems(roots: list[Path]) -> set[str]:
         if not root.exists():
             continue
         for f in root.glob("**/*.md"):
+            # `_quarantine/` 로 옮긴 노트는 없는 것으로 본다 — 그래야 격리가
+            # 해당 클리핑의 재생성을 다시 열어준다(이 모듈 docstring 의 약속).
+            if "_quarantine" in f.parts:
+                continue
             try:
                 m = SOURCE_CLIPPING_RE.search(f.read_text(encoding="utf-8", errors="ignore"))
             except Exception:

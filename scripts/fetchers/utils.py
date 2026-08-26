@@ -1,6 +1,8 @@
 import re
 from datetime import datetime
 from urllib.parse import urlparse, unquote
+
+from content_validation import validate_content
 from pathlib import Path
 import unicodedata
 
@@ -157,7 +159,12 @@ def format_clipping(url: str, title: str, content: str, method: str,
     
     is_social = is_twitter_url(url) or is_linkedin_url(url) or is_facebook_url(url)
     
-    if is_linkedin_url(url):
+    # ultimate-fetcher 의 LinkedIn 플러그인이 이미 정제한 본문은 다시 정제하지 않는다
+    # (method 가 "linkedin-" / "linkedin_" 로 시작하면 플러그인이 처리한 것).
+    uf_handled_linkedin = bool(method) and (
+        method.startswith("linkedin-") or method.startswith("linkedin_")
+    )
+    if is_linkedin_url(url) and not uf_handled_linkedin:
         content = _clean_linkedin_content(content)
         # Clean title
         title = re.sub(r"\s*\|\s*[^\|]+$", "", title)  # remove trailing | Author/LinkedIn
@@ -195,11 +202,16 @@ def format_clipping(url: str, title: str, content: str, method: str,
     # Strip Jina metadata headers from all non-thread, non-social content
     if source_type != "thread" and not is_twitter_url(url) and not is_linkedin_url(url):
         content = _clean_jina_content(content, title)
-    date = datetime.now().strftime("%Y%m%d")
+    now = datetime.now()
+    date = now.strftime("%Y%m%d")
     slug = sanitize_slug(slug_from_title_and_url(title, url) or urlparse(url).netloc.replace(".", "-"))
     slug = slug[:20].strip("-")
     filename = f"{date}-{slug}.md"
-    word_count = len(content.split())
+
+    # VERIFY 게이트 — 정제가 끝난 최종 본문을 검증한다. Jina/브리지는 원본이
+    # 500·로그인벽·CAPTCHA 여도 200 으로 응답하므로, 여기서 걸러야 에러 페이지가
+    # `clipped` 로 위키에 유입되지 않는다. (근거: clippings/20260611-medium.md)
+    validation = validate_content(content, source_type=source_type, url=url, title=title)
 
     tags = []
     if source_type == "thread" or is_twitter_url(url):
@@ -216,15 +228,19 @@ def format_clipping(url: str, title: str, content: str, method: str,
     front_matter_data = {
         "source_url": url,
         "source_type": source_type,
-        "clipped_at": datetime.now().isoformat(),
+        "created": now.date().isoformat(),
+        "clipped_at": now.isoformat(),
         "title": title,
         "author": author,
-        "word_count": word_count,
+        "word_count": validation.word_count,
         "fetch_method": method,
-        "status": "clipped",
+        "status": "fetch_failed" if validation.failed else "clipped",
         "domain_hint": domain_hint,
         "tags": tags,
     }
+    if not validation.ok:
+        front_matter_data["content_warning"] = validation.code
+        front_matter_data["content_warning_reason"] = validation.reason
     front_matter = f"---\n{_yaml_dump(front_matter_data)}\n---\n"
 
     body = f"""{content}
