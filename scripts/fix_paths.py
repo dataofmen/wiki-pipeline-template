@@ -28,6 +28,11 @@ def fix_all_paths(root_dir):
         for file_path in dir_path.rglob("*.md"):
             if file_path.name == "index.md":
                 continue
+            # `_quarantine/` 은 의도적으로 격리한 노트다. type/target 기준으로
+            # 원위치로 되돌리면 격리가 무력화된다 (실제로 격리한 노트 14개가
+            # 이 루프에 의해 wiki/concepts·garden 으로 복귀한 사고가 있었다).
+            if "_quarantine" in file_path.parts:
+                continue
                 
             with open(file_path, 'r', encoding='utf-8') as f:
                 content = f.read()
@@ -77,6 +82,9 @@ def fix_all_paths(root_dir):
         for root_p, dirs, files in os.walk(dir_path, topdown=False):
             # Do not delete the main folders
             if Path(root_p) in [root / "garden", root / "wiki", root / "wiki" / "concepts", root / "wiki" / "entities"]:
+                continue
+            # 격리 디렉터리는 비어 있어도 지우지 않는다.
+            if "_quarantine" in Path(root_p).parts:
                 continue
             if not os.listdir(root_p):
                 print(f"Removing empty directory: {Path(root_p).relative_to(root)}")

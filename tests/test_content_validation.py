@@ -261,3 +261,24 @@ def test_frontmatter_is_not_confused_by_body_dashes():
     assert "title: t" not in body
     assert "status: clipped" not in body
     assert "뒤쪽 본문도 남는다." in body
+
+AKAMAI_BLOCK = """Powered and protected by
+
+![Akamai](https://www.akamai.com/site/ko/images/logo/akamai-logo1.svg)
+
+[Privacy](https://www.akamai.com/privacy "https://www.akamai.com/privacy")
+"""
+
+
+def test_akamai_interstitial_is_failed():
+    """쿠팡 단축링크가 반환한 Akamai Bot Manager 페이지."""
+    r = validate_content(AKAMAI_BLOCK, source_type="url", title="link.coupang.com")
+    assert r.verdict == FAILED
+    assert "Akamai" in r.reason
+
+
+def test_short_article_mentioning_akamai_passes():
+    """CDN 비교 글이 Akamai 를 언급해도 죽지 않아야 한다 — 마커는 인터스티셜 문구 한정."""
+    r = validate_content("Akamai 와 Cloudflare 의 엣지 캐싱 전략을 비교한다. " * 10,
+                         source_type="thread")
+    assert r.verdict == OK, r

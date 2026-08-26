@@ -31,6 +31,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from safe_write import safe_write, split_frontmatter, write_frontmatter_only  # noqa: E402
 
 PROJECT_DIR = Path(__file__).resolve().parent.parent
+# `_quarantine/` 하위는 정규화 대상에서 제외한다 — 격리된 노트는 손대지 않는다.
+EXCLUDE_PARTS = {"_quarantine"}
 DEFAULT_ROOTS = [
     PROJECT_DIR / "clippings",
     PROJECT_DIR / "wiki" / "concepts",
@@ -252,6 +254,8 @@ def normalize_roots(roots: list[Path], *, apply: bool = False) -> dict:
             continue
         for f in sorted(root.glob("**/*.md")):
             if f.name == "index.md":
+                continue
+            if EXCLUDE_PARTS & set(f.parts):
                 continue
             counts["files"] += 1
             if apply:

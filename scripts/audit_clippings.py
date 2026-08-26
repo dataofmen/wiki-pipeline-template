@@ -164,6 +164,44 @@ def quarantine_notes(rows: list[dict], dry_run: bool = True) -> int:
     return changed
 
 
+def quarantine_stamped(dry_run: bool = True) -> int:
+    """`quarantine_reason` 스탬프가 있는데 본 위치에 남아 있는 노트를 격리한다.
+
+    두 경우에 필요하다.
+    1. 원본 클리핑이 `clippings/_quarantine/` 로 옮겨져 audit() 대상에서 빠진 뒤에도
+       파생 노트는 wiki/garden 에 남아 있는 경우.
+    2. `fix_paths.py` 같은 경로 보정 스크립트가 격리를 되돌린 경우
+       (실제로 14건이 type/target 기준으로 원위치 복귀한 사고가 있었다).
+
+    스탬프 자체가 격리 의도의 기록이므로, 이 함수는 몇 번 돌려도 결과가 같다.
+    """
+    changed = 0
+    for root in NOTE_DIRS:
+        if not root.exists():
+            continue
+        for note in sorted(root.rglob("*.md")):
+            if "_quarantine" in note.parts:
+                continue
+            try:
+                text = note.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                continue
+            if "quarantine_reason:" not in text[:2500]:
+                continue
+            rel = note.relative_to(PROJECT_DIR)
+            top = rel.parts[0]
+            dest = PROJECT_DIR / top / "_quarantine" / Path(*rel.parts[1:])
+            changed += 1
+            if dry_run:
+                print(f"  [dry-run] {rel} → {dest.relative_to(PROJECT_DIR)} (스탬프 보유)")
+            else:
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_text(text, encoding="utf-8")
+                note.unlink()
+                print(f"  격리: {rel} → {dest.relative_to(PROJECT_DIR)} (스탬프 보유)")
+    return changed
+
+
 def report(rows: list[dict], verdict_filter: str = "", show_notes: bool = False) -> None:
     counts = Counter(r["verdict"] for r in rows)
     codes = Counter(r["code"] for r in rows if r["verdict"] != "ok")
@@ -207,7 +245,9 @@ def main() -> int:
     ap.add_argument("--fix-status", action="store_true",
                     help="실패 클리핑 프론트매터를 fetch_failed 로 갱신")
     ap.add_argument("--quarantine", action="store_true",
-                    help="실패 클리핑의 파생 노트를 status: draft 로 강등")
+                    help="실패 클리핑의 파생 노트를 _quarantine/ 으로 이동")
+    ap.add_argument("--reclaim-stamped", action="store_true",
+                    help="quarantine_reason 스탬프가 있는데 본 위치에 남은 노트를 재격리")
     ap.add_argument("--apply", action="store_true",
                     help="--fix-status/--quarantine 를 실제로 기록 (없으면 dry-run)")
     args = ap.parse_args()
@@ -230,7 +270,12 @@ def main() -> int:
         n = quarantine_notes(rows, dry_run=not args.apply)
         print(f"{n}건 {'예정' if not args.apply else '완료'}\n")
 
-    if (args.fix_status or args.quarantine) and not args.apply:
+    if args.reclaim_stamped:
+        print("=== 스탬프 보유 노트 재격리 ===")
+        n = quarantine_stamped(dry_run=not args.apply)
+        print(f"{n}건 {'예정' if not args.apply else '완료'}\n")
+
+    if (args.fix_status or args.quarantine or args.reclaim_stamped) and not args.apply:
         print("실제 적용은 --apply 를 붙여 실행한다.")
 
     return 0

@@ -124,6 +124,9 @@ CONTEXT_MARKERS: list[tuple[str, str, str]] = [
     (JS_REQUIRED, "Please enable JavaScript to view", "JS 요구"),
     (JS_REQUIRED, "You need to enable JavaScript to run this app", "JS 요구"),
     (JS_REQUIRED, "Just a moment...", "Cloudflare 대기 페이지"),
+    # Akamai Bot Manager 인터스티셜. 본문 전체가 이 푸터뿐이면 차단 페이지다.
+    # (실측: 쿠팡 단축링크 link.coupang.com 이 이 페이지를 반환)
+    (BOT_BLOCK, "Powered and protected by", "Akamai 봇 차단 인터스티셜"),
 ]
 
 # 추출기(Jina)가 붙이는 경고 — 단독으로는 실패가 아니다. 짧은 본문과 결합할 때만 신호.

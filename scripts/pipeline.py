@@ -746,6 +746,12 @@ def _is_claude_capacity_error(detail: str) -> bool:
     return any(marker in text for marker in capacity_markers)
 
 
+def _cli_excerpt(stdout: str = "", stderr: str = "", limit: int = 500) -> str:
+    """Compact CLI output for logs/result metadata without flooding pipeline.log."""
+    detail = "\n".join(part.strip() for part in (stderr, stdout) if part and part.strip())
+    return detail[:limit]
+
+
 def phase_note_make(clippings: list[dict], timeout: int = 3600) -> list[dict]:
     """Phase 4: Generate notes using the Claude Code CLI (`claude -p`).
 
@@ -910,6 +916,8 @@ def phase_note_make(clippings: list[dict], timeout: int = 3600) -> list[dict]:
         logger.info(f"[{clipping_stem}] Invoking Claude Code CLI (claude -p)...")
         per_call_timeout = min(timeout, 1800)  # 30 min max per clipping
         poll_interval = 10  # seconds between progress logs
+        cli_returncode = 0
+        cli_detail = ""
 
         try:
             # Headless, non-interactive agent run. The prompt is passed as a
@@ -945,18 +953,19 @@ def phase_note_make(clippings: list[dict], timeout: int = 3600) -> list[dict]:
                     logger.info(f"[{clipping_stem}] Claude still running ({elapsed}s elapsed)")
 
             stdout, stderr = proc.communicate(timeout=10)
+            cli_returncode = proc.returncode
+            cli_detail = _cli_excerpt(stdout, stderr)
             if proc.returncode != 0:
-                detail = (stderr or stdout or "").strip()
                 logger.error(
                     f"[{clipping_stem}] claude -p exited {proc.returncode}: "
-                    f"{detail[:500]}"
+                    f"{cli_detail[:500]}"
                 )
-                if _is_claude_capacity_error(detail):
+                if _is_claude_capacity_error(cli_detail):
                     return {
                         "clipping_path": str(clipping_path),
                         "generated_files": [],
                         "status": "deferred",
-                        "error": detail[:500],
+                        "error": cli_detail[:500],
                     }
         except subprocess.TimeoutExpired:
             logger.error(f"[{clipping_stem}] claude -p timed out after {per_call_timeout}s")
@@ -974,11 +983,23 @@ def phase_note_make(clippings: list[dict], timeout: int = 3600) -> list[dict]:
                 "generated_files": saved_files,
                 "status": "success",
             }
-        logger.warning(f"[{clipping_stem}] No new notes with matching source_clipping found")
+        if cli_detail:
+            logger.info(f"[{clipping_stem}] claude output without generated notes: {cli_detail}")
+        if cli_returncode != 0:
+            logger.warning(f"[{clipping_stem}] No generated notes after claude failure; marking parse_error")
+            return {
+                "clipping_path": str(clipping_path),
+                "generated_files": [],
+                "status": "parse_error",
+                "error": cli_detail,
+            }
+        logger.warning(f"[{clipping_stem}] No new notes with matching source_clipping found; marking skipped")
         return {
             "clipping_path": str(clipping_path),
             "generated_files": [],
-            "status": "parse_error",
+            "status": "skipped",
+            "reason": "no_notes_generated",
+            "output": cli_detail,
         }
 
     from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -1205,14 +1226,19 @@ def phase_report(ingest_results: list, note_results: list, publish_success, diag
     notes_ok = len([r for r in note_results if r.get("status") == "success"])
     notes_fail = len([r for r in note_results if r.get("status") in ("error", "parse_error", "timeout")])
     notes_deferred = len([r for r in note_results if r.get("status") == "deferred"])
+    notes_skipped = len([r for r in note_results if r.get("status") == "skipped"])
     _, publish_text = _publish_label(publish_success)
 
     # Overall health: a run is failed if publish failed, or notes were attempted
-    # but none succeeded for a repairable reason. Claude account/capacity
-    # limits are deferred work, not pipeline code defects, so they should not
-    # trigger Telegram-agent self-repair.
+    # but none succeeded for a repairable reason. Claude account/capacity limits
+    # are deferred work, and explicit/no-note triage is skipped work; neither
+    # should trigger Telegram-agent self-repair.
     pub_failed = publish_success is False
-    notegen_failed = notes_created > 0 and notes_ok == 0 and notes_deferred != notes_created
+    notegen_failed = (
+        notes_created > 0
+        and notes_ok == 0
+        and (notes_deferred + notes_skipped) != notes_created
+    )
     ok = not (pub_failed or notegen_failed)
     status_marker = "✅ 성공" if ok else "❌ 실패"
     duration_txt = f"{run_duration:.0f}s" if run_duration else "n/a"
@@ -1222,7 +1248,7 @@ def phase_report(ingest_results: list, note_results: list, publish_success, diag
 {'=' * 50}
 - 수신: {len(ingest_results)}개 항목
 - 클리핑: {successful_clips}개 완료 / {failed_clips}개 실패
-- 노트 생성: {notes_created}개 (성공 {notes_ok} / 실패 {notes_fail} / 지연 {notes_deferred})
+- 노트 생성: {notes_created}개 (성공 {notes_ok} / 실패 {notes_fail} / 지연 {notes_deferred} / 스킵 {notes_skipped})
 - 퍼블리시: {publish_text}
 - 사이트: {SITE_BASE_URL}/
 
