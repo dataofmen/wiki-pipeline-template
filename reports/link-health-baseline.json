@@ -1,0 +1,11 @@
+{
+  "note": "scripts/check_links.py --update-baseline 로 기록",
+  "metrics": {
+    "actionable": 0,
+    "body_stub": 3792,
+    "frontmatter": 3673,
+    "ambiguous_body": 1879,
+    "broken_total": 7465,
+    "ambiguous_total": 3153
+  }
+}

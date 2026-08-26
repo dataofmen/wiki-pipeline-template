@@ -161,6 +161,26 @@ def notify_telegram(ingest_results: list, note_results: list, publish_success) -
         for r in gated[:5]:
             lines.append(f"  • {r.get('source_url', '')[:70]}")
 
+    # 링크 건강: 기준선보다 악화된 경우에만 보고한다. 정상일 때 조용해야 신호가 산다.
+    try:
+        sys.path.insert(0, str(SCRIPTS_DIR))
+        import check_links as _cl
+        _b, _a = _cl.check_links(PROJECT_DIR)
+        m = _cl.summarize(_b, _a)
+        base = _cl.load_baseline() or {}
+        d_act = m["actionable"] - base.get("actionable", 0)
+        d_amb = m["ambiguous_body"] - base.get("ambiguous_body", 0)
+        if m["actionable"] > 0 or d_act > 0 or d_amb > 0:
+            lines.append("")
+            lines.append("🔗 *링크 건강 악화*")
+            if m["actionable"] > 0:
+                lines.append(f"  • 조치 필요(본문·대상 소실): {m['actionable']}건 ({d_act:+d})")
+            if d_amb > 0:
+                lines.append(f"  • 중복 슬러그: {m['ambiguous_body']}건 ({d_amb:+d})")
+            lines.append("  _`python3 scripts/check_links.py --list` 로 확인_")
+    except Exception as e:
+        logger.warning(f"링크 건강 조회 실패: {e}")
+
     # Tier-0 알림 큐: 콘텐츠 안의 시한성 정보
     try:
         from alerts import format_for_notification
@@ -917,6 +937,11 @@ def phase_note_make(clippings: list[dict], timeout: int = 3600) -> list[dict]:
    - 인물·도구·조직·프레임워크가 핵심으로 등장하면 wiki/entities/ entity 노트를 추가로 생성
 4. 모든 노트 프론트매터에 반드시 포함: `source_clipping: "[[{clipping_stem}]]"` 와 `status: publish`.
 5. **모든 제목과 본문은 한국어로 작성.** 파일명은 영문 kebab-case 슬러그.
+6. **노트 파일명을 클리핑 파일명(`{clipping_stem}`)과 같게 만들지 마라.** 슬러그가
+   충돌하면 Quartz 의 shortest 해상도가 `[[슬러그]]` 를 노트와 클리핑 중 어디로
+   보낼지 결정할 수 없다. 노트 파일명은 **내용을 서술하는 슬러그**로 지어라
+   (예: 클리핑이 `20260613-ep98-ko-transcript` 면 노트는
+   `20260613-context-window-as-attention-budget` 처럼).
 
 [중요 규칙]
 - 노트를 stdout으로 출력하지 말고 반드시 프로젝트 디렉터리에 파일로 생성하라.

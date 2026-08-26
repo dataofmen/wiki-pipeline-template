@@ -12,6 +12,8 @@ Stages (in order):
   2. Date consistency      — ensure `created` exists; frontmatter value wins,
      filename YYYYMMDD is a *fallback only* (never overrides frontmatter).
   3. Wikilink cleanup      — rewrite path-prefixed [[concepts/x]] -> [[x]].
+  4. Dead-link unlinking   — 본문의 소실 날짜슬러그 링크를 평문화(표시 텍스트 유지).
+     프론트매터(source_clipping/target)는 건드리지 않는다.
 
 All writes go through scripts/safe_write.py integrity guards.
 
@@ -247,8 +249,80 @@ def normalize_file_wikilinks(path: Path) -> bool:
     return True
 
 
+# ---------------------------------------------------- stage 4: 소실 링크 해제
+
+# 날짜 접두사 슬러그(`YYYYMMDD-…`)를 가리키는 위키링크 중, 볼트 어디에도 실물이
+# 없는 것은 영구 소실이다(클리핑이 삭제·격리되면 되돌아오지 않는다). 사이트에서는
+# 깨진 링크로 보이므로 **링크만 해제하고 표시 텍스트는 남긴다** — 출처 정보를
+# 잃지 않으면서 깨진 내비게이션을 없앤다.
+#
+# 프론트매터는 건드리지 않는다. `source_clipping` 은 pipeline_state 가 "처리 완료"
+# 판정에 쓰는 필드이고, `target:` 은 관계 그래프 메타데이터다. 여기서 지우면
+# 클리핑이 전부 재생성되거나 관계 정보가 사라진다.
+#
+# 실측(2026-08-27): 본문 링크 5,069건 중 1,277건이 이 경우(고유 타깃 431개, 전 볼트
+# 조회 결과 실물 0개).
+
+DATED_SLUG_RE = re.compile(r"^\d{8}-")
+BODY_WIKILINK_RE = re.compile(r"\[\[([^\]\[|#]+?)(?:#[^\]|]*?)?(?:\|([^\]]*?))?\]\]")
+
+_VAULT_STEMS: set[str] | None = None
+
+
+def vault_stems(refresh: bool = False) -> set[str]:
+    """볼트 전체(격리·inbox 포함)의 노트/클리핑 stem. 캐시된다."""
+    global _VAULT_STEMS
+    if _VAULT_STEMS is not None and not refresh:
+        return _VAULT_STEMS
+    stems: set[str] = set()
+    for name in ("clippings", "wiki", "garden", "inbox"):
+        root = PROJECT_DIR / name
+        if root.exists():
+            stems |= {p.stem for p in root.rglob("*.md")}
+    _VAULT_STEMS = stems
+    return stems
+
+
+def _unlink_dead(match: re.Match) -> str:
+    target = (match.group(1) or "").strip()
+    alias = match.group(2)
+    leaf = target.split("/")[-1]
+    if not DATED_SLUG_RE.match(leaf):
+        return match.group(0)
+    if leaf in vault_stems():
+        return match.group(0)
+    # 표시 텍스트를 남긴다.
+    #  - alias 가 있으면 사람이 읽는 그 텍스트를 쓴다
+    #  - 없으면 슬러그를 코드 표기로 남긴다. 식별자를 보존해 추적은 가능하게 하면서,
+    #    본문 산문으로 오해되지 않게 하고 나중에 grep 으로 찾을 수 있게 한다.
+    alias = (alias or "").strip()
+    return alias if alias else f"`{leaf}`"
+
+
+def normalize_file_dead_links(path: Path) -> int:
+    """본문의 소실 날짜슬러그 링크를 평문화. 변경된 링크 수를 반환.
+
+    프론트매터는 원문 그대로 유지한다.
+    """
+    text = path.read_text(encoding="utf-8", errors="replace")
+    fm, body = split_frontmatter(text)
+    if fm is None:
+        head, target_body = "", text
+    else:
+        # split_frontmatter 는 (fm, body) 를 주므로 원래 헤더를 재구성한다
+        head = text[: len(text) - len(body)]
+        target_body = body
+    new_body, n = BODY_WIKILINK_RE.subn(_unlink_dead, target_body)
+    if n == 0 or new_body == target_body:
+        return 0
+    changed = sum(1 for _ in BODY_WIKILINK_RE.finditer(target_body)) - \
+        sum(1 for _ in BODY_WIKILINK_RE.finditer(new_body))
+    safe_write(path, head + new_body)
+    return max(changed, 1)
+
+
 def normalize_roots(roots: list[Path], *, apply: bool = False) -> dict:
-    counts = {"title_or_date": 0, "wikilinks": 0, "files": 0}
+    counts = {"title_or_date": 0, "wikilinks": 0, "dead_links": 0, "files": 0}
     for root in roots:
         if not root.exists():
             continue
@@ -263,6 +337,7 @@ def normalize_roots(roots: list[Path], *, apply: bool = False) -> dict:
                     counts["title_or_date"] += 1
                 if normalize_file_wikilinks(f):
                     counts["wikilinks"] += 1
+                counts["dead_links"] += normalize_file_dead_links(f)
             else:
                 # dry run: compute without writing
                 text = f.read_text(encoding="utf-8", errors="replace")
@@ -276,6 +351,12 @@ def normalize_roots(roots: list[Path], *, apply: bool = False) -> dict:
                         counts["title_or_date"] += 1
                 if WIKILINK_PREFIX.search(text):
                     counts["wikilinks"] += 1
+                _fm, _body = split_frontmatter(text)
+                probe = _body if _fm is not None else text
+                counts["dead_links"] += sum(
+                    1 for m in BODY_WIKILINK_RE.finditer(probe)
+                    if _unlink_dead(m) != m.group(0)
+                )
     return counts
 
 

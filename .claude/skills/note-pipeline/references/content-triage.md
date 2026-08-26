@@ -98,3 +98,21 @@ python3 scripts/alerts.py add "<한 줄 요약>" --category <카테고리> --sou
 `project_risk`(진행 중 프로젝트에 영향을 주는 정책·경쟁 변화) · `deadline`(마감·행사일)
 
 날짜가 명시된 것만 넣는다. 추측하지 않는다.
+
+## 노트 파일명 — 클리핑 슬러그 재사용 금지
+
+노트 파일명을 클리핑 파일명과 같게 지으면 Quartz 의 shortest 해상도가 `[[슬러그]]` 를
+노트와 클리핑 중 어디로 보낼지 결정할 수 없다. 링크가 예측 불가하게 걸린다.
+
+실측(2026-08-27): 45개 충돌 → 본문 ambiguous 링크 1,879건. 그중 하나
+(`20260613-ep98-ko-transcript`)만 727회 참조되고 있었다.
+
+노트 파일명은 **내용을 서술하는 슬러그**로 짓는다.
+
+```
+클리핑 : 20260613-ep98-ko-transcript
+노트   : 20260613-context-window-as-attention-budget   ← 이렇게
+         20260613-ep98-ko-transcript                   ← 금지
+```
+
+확인: `python3 scripts/audit_clippings.py --collisions`

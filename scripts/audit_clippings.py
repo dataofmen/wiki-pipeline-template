@@ -202,6 +202,30 @@ def quarantine_stamped(dry_run: bool = True) -> int:
     return changed
 
 
+def slug_collisions() -> list[dict]:
+    """노트 파일명이 클리핑 파일명과 겹치는 경우를 찾는다.
+
+    note-maker 가 클리핑 슬러그를 그대로 노트 파일명으로 쓰면 Quartz 의 shortest
+    해상도가 어느 쪽인지 결정할 수 없어 `[[슬러그]]` 링크가 예측 불가하게 걸린다.
+    (실측 2026-08-27: 고유 48개 충돌 → 본문 ambiguous 링크 1,879건)
+    """
+    clip = {p.stem: p for p in CLIPPINGS_DIR.glob("*.md") if p.name not in EXCLUDE_NAMES}
+    out = []
+    for root in NOTE_DIRS:
+        if not root.exists():
+            continue
+        for note in sorted(root.rglob("*.md")):
+            if "_quarantine" in note.parts or note.name == "index.md":
+                continue
+            if note.stem in clip:
+                out.append({
+                    "note": str(note.relative_to(PROJECT_DIR)),
+                    "clipping": str(clip[note.stem].relative_to(PROJECT_DIR)),
+                    "slug": note.stem,
+                })
+    return out
+
+
 def report(rows: list[dict], verdict_filter: str = "", show_notes: bool = False) -> None:
     counts = Counter(r["verdict"] for r in rows)
     codes = Counter(r["code"] for r in rows if r["verdict"] != "ok")
@@ -246,6 +270,8 @@ def main() -> int:
                     help="실패 클리핑 프론트매터를 fetch_failed 로 갱신")
     ap.add_argument("--quarantine", action="store_true",
                     help="실패 클리핑의 파생 노트를 _quarantine/ 으로 이동")
+    ap.add_argument("--collisions", action="store_true",
+                    help="노트 파일명이 클리핑 파일명과 충돌하는 경우를 나열")
     ap.add_argument("--reclaim-stamped", action="store_true",
                     help="quarantine_reason 스탬프가 있는데 본 위치에 남은 노트를 재격리")
     ap.add_argument("--apply", action="store_true",
@@ -269,6 +295,17 @@ def main() -> int:
         print("=== 파생 노트 격리 ===")
         n = quarantine_notes(rows, dry_run=not args.apply)
         print(f"{n}건 {'예정' if not args.apply else '완료'}\n")
+
+    if args.collisions:
+        cols = slug_collisions()
+        print(f"=== 슬러그 충돌 {len(cols)}건 ===")
+        for c in cols:
+            print(f"  {c['slug']}")
+            print(f"     노트   : {c['note']}")
+            print(f"     클리핑 : {c['clipping']}")
+        if cols:
+            print("\n→ 노트를 서술형 슬러그로 rename 해야 `[[슬러그]]` 가 클리핑으로 확정된다.")
+        print()
 
     if args.reclaim_stamped:
         print("=== 스탬프 보유 노트 재격리 ===")
