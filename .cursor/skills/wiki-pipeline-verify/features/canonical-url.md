@@ -8,6 +8,7 @@ Canonical URL gives one identity to a source link: `twitter.com` and `x.com` mat
 - `canonical-x-alias` collapses `twitter.com`, `mobile.twitter.com`, and `x.com`, and drops `s`, `t`, `utm_*`, and any other X query key.
 - `canonical-wordpress` keeps `?s=` on a non-X host and still drops `utm_*` and `si`.
 - `canonical-decode-once` decodes a LinkedIn path once and leaves a `%2520` query value as `%20`.
+- `canonical-idempotent` keeps `normalize(normalize(x)) == normalize(x)`, including a slash-only path and a path that still contains `%`.
 - `canonical-not-substring` does not treat `box.com` or `foo.twitter.com` as X.
 - `canonical-legacy` shows the pre-type normalizers failing those identities.
 
@@ -36,4 +37,8 @@ Preconditions:
 - `"x.com" in host` is true for `box.com`. The contract compares the whole host.
 - Stripping `s` on every host makes `test_wordpress_search_is_not_stripped` fail and matches the bug in 2734927.
 - Decoding the raw URL and then calling `parse_qsl` turns `%2520` into a space. That is the double decode.
+- `quote(path, safe="/")` on the whole identity percent-encodes a LinkedIn slug. `test_legacy_normalizers_fail_the_canonical_contract` then sees the same string as the legacy helper. Encode `%`, `#`, `?`, and whitespace only.
+- `str.strip` removes a trailing non-breaking space. A stored path that ends with one has to be percent-encoded in `identity` or the second parse drops it.
+- `rstrip("/")` on `//` is `""`. That empty path parses back as `/` and fails idempotence. A slash-only path is `/`.
 - Do not point this `-k` run at `tests/test_dedup.py` and report it as CanonicalUrl. That file covers the older helper.
+- Property coverage for idempotence, aliases, and one decode lives in `tests/test_pipeline_properties.py`. The `-k` command above does not run it.

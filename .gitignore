@@ -27,6 +27,7 @@ __pycache__/
 *.pyc
 venv/
 .venv/
+.hypothesis/
 
 # Telegram bot state
 scripts/*.session

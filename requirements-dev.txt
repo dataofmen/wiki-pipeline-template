@@ -1,0 +1,5 @@
+# Test-only dependencies. The pipeline venv does not need these.
+# Install: python3 -m pip install -r requirements-dev.txt
+pytest
+hypothesis
+inline-snapshot
