@@ -9,18 +9,18 @@ The surface under test is the typed boundary in `scripts/pipeline_contract.py`: 
 
 ## When to run
 
-Run this after any edit to `scripts/pipeline_contract.py`, `tests/test_pipeline_contract.py`, or `pytest.ini`, and before claiming URL identity or quarantine placement still holds. Also run it when a change proposes to strip query parameters, decode percent-escapes, alias hosts, or move notes during publish/fix.
+Run this after any edit to `scripts/pipeline_contract.py`, `tests/test_pipeline_contract.py`, `tests/test_pipeline_snapshots.py`, `tests/test_pipeline_properties.py`, or `pytest.ini`, and before claiming URL identity or quarantine placement still holds. Also run it when a change proposes to strip query parameters, decode percent-escapes, alias hosts, or move notes during publish/fix.
 
 ## Launch
 
 From the repository root, with a network path that can reach PyPI:
 
 ```bash
-python3 -m pip install pytest
-python3 -m pytest --collect-only -q tests/test_pipeline_contract.py
+python3 -m pip install -r requirements-dev.txt
+python3 -m pytest --collect-only -q tests/test_pipeline_contract.py tests/test_pipeline_snapshots.py tests/test_pipeline_properties.py
 ```
 
-There is no server. Ready means the collect command exits 0 and lists `tests/test_pipeline_contract.py`. `pytest.ini` sets `testpaths = tests` and `pythonpath = scripts`, so a later `python3 -m pytest` collects this file with the rest of `tests/`.
+There is no server. Ready means the collect command exits 0 and lists `tests/test_pipeline_contract.py`, `tests/test_pipeline_snapshots.py`, and `tests/test_pipeline_properties.py`. `pytest.ini` sets `testpaths = tests` and `pythonpath = scripts`, so a later `python3 -m pytest` collects these files with the rest of `tests/`.
 
 ## Doctor
 
@@ -48,7 +48,13 @@ python3 -m pytest tests/test_pipeline_contract.py -q --tb=short -k "canonical_ur
 python3 -m pytest tests/test_pipeline_contract.py -q --tb=short -k "placement or publish_fix or legacy_quarantine or conflict_markers"
 ```
 
-The full configured suite, which includes the older tests plus this file:
+The snapshot report and the property checks:
+
+```bash
+python3 -m pytest tests/test_pipeline_snapshots.py tests/test_pipeline_properties.py -q --tb=short
+```
+
+The full configured suite, which includes the older tests plus these files:
 
 ```bash
 python3 -m pytest -q --tb=line
@@ -75,12 +81,17 @@ A passing summary is not proof if the file was produced by editing an assertion 
 - `legacy_normalizers` assertion: the golden value moved to match a historical helper. That is a weakened contract, not a fix.
 - `quarantine walk`: `apply_publish_fix` or `Publishable` moved a quarantine note back, deleted a quarantine directory, or accepted `Space.QUARANTINE`. This is the ca2611bb failure.
 - `conflict-marker`: `scripts/pipeline_contract.py` or `tests/test_pipeline_contract.py` contains a line that starts with `<<<<<<<`, `=======`, or `>>>>>>>`. A vault sync left an unresolved merge.
+- Snapshot diff in `tests/test_pipeline_snapshots.py`: the sample report changed. A quarantine note that returned to its old folder changes `disk_after` and adds a `Moves` row. A second percent-decode changes the `percent-twice` path from `'/%20file'` toward a space, or the `slash-only` path away from `'/'`.
+- Hypothesis failure in `tests/test_pipeline_properties.py`: `normalize` is not idempotent, an `x.com` / `twitter.com` alias diverged, or a percent-escape was decoded twice. The minimal counterexample is the bug.
 
 ## What not to change
 
 - Do not rewrite `scripts/pipeline.py`, `scripts/fix_paths.py`, or `scripts/normalize.py` to make these tests pass. The contract is `scripts/pipeline_contract.py`. A thin import is the only pipeline edit that belongs with this boundary, and only if a caller must prove it uses the type.
 - Do not strip `s` or `t` on every host. That collapses WordPress `?s=` search URLs.
 - Do not percent-decode a URL and then parse the query with `parse_qsl`. That decodes twice.
+- Do not splice `CanonicalUrl.path` into `identity` without encoding `%`, `#`, `?`, and whitespace. The stored path is decoded once; the identity string has to survive a second parse.
+- Do not `rstrip("/")` a slash-only path down to `""`. That parses back as `/` and breaks `normalize(normalize(x)) == normalize(x)`.
+- Do not percent-encode non-ASCII letters in `identity`. That makes a LinkedIn slug match the legacy normalizer, which the golden test requires to disagree.
 - Do not treat `"x.com" in host` as an alias. `box.com` is not X.
 - Do not skip `_quarantine` with a string match inside a walker and call that the placement type. `space` is `wiki | garden | clippings | quarantine`. Publish/fix takes `Publishable`, which rejects quarantine.
 - Do not delete empty quarantine directories in the publish/fix path.

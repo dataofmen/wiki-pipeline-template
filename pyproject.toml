@@ -1,0 +1,3 @@
+# Lets `pytest --inline-snapshot=fix` update tests without Black.
+[tool.inline-snapshot]
+format-command = "cat"

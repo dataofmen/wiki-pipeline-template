@@ -38,3 +38,4 @@ Each feature file starts with an H1 title and one paragraph describing the user-
 
 - [Canonical URL](./canonical-url.md) covers host aliases, the per-host query allowlist, one-time percent-decode, and the legacy normalizers that fail those rules.
 - [Placement](./placement.md) covers the four spaces, the publish/fix refusal to move quarantine notes, and the conflict-marker check.
+- [Snapshots and properties](./snapshots-and-properties.md) covers the sample report and the Hypothesis checks for idempotence, host aliases, and one percent-decode.

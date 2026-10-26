@@ -33,6 +33,6 @@ Preconditions:
 
 - `scripts/fix_paths.py` on this branch already skips `_quarantine` by string match. That skip is not `Placement`. Do not report a run of `fix_paths.py` as this feature.
 - A publish/fix that returns without moving anything still fails if `wiki/events/loose.md` is still in `events/`. The typed path must relocate that publishable note.
-- Deleting an empty `wiki/_quarantine/unused` directory fails the test with `quarantine walk`.
+- Deleting an empty `wiki/_quarantine/unused` directory fails the test with `quarantine walk`. The same regression changes `Directories` and `Moves` in the snapshot report (`tests/test_pipeline_snapshots.py`).
 - The conflict-marker scan covers `scripts/pipeline_contract.py` and `tests/test_pipeline_contract.py` only. Markers in other files are outside this check.
 - Do not remove `test_legacy_quarantine_walk_fails_the_same_check` to silence a failure. That test is how the old walk is shown to trip the message.

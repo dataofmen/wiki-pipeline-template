@@ -19,7 +19,7 @@ import re
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from urllib.parse import parse_qsl, unquote, urlencode, urlsplit
+from urllib.parse import parse_qsl, quote, unquote, urlencode, urlsplit
 
 
 class ContractError(ValueError):
@@ -74,11 +74,37 @@ def _strip_wrapping_quotes(raw: str) -> str:
     return text
 
 
+def _encode_identity_path(path: str) -> str:
+    """Percent-encode path characters that a second parse would reinterpret.
+
+    Non-ASCII letters stay decoded. A LinkedIn slug stays readable, and the
+    identity string does not collapse onto the legacy normalizer, which leaves
+    the original percent-encoding in place. ``%``, ``#``, ``?``, and whitespace
+    cannot stay raw: ``%20`` would become a space, ``#`` / ``?`` would be read
+    as a fragment or a query, and ``str.strip`` would eat a trailing
+    non-breaking space.
+    """
+    encoded: list[str] = []
+    for char in path:
+        if char in "-._~/" or (char.isascii() and char.isalnum()):
+            encoded.append(char)
+        elif ord(char) > 126 and not char.isspace():
+            encoded.append(char)
+        else:
+            encoded.append(quote(char, safe=""))
+    return "".join(encoded)
+
+
 def _normalize_path(path: str) -> str:
-    decoded = unquote(path)
+    """Percent-decode once and drop a trailing slash.
+
+    ``//`` and ``/`` are the same path. ``rstrip`` turns a slash-only path
+    into ``""``, and that empty string parses back as ``/``.
+    """
+    decoded = unquote(path).rstrip("/")
     if decoded in {"", "/"}:
         return "/"
-    return decoded.rstrip("/")
+    return decoded
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,7 +114,9 @@ class CanonicalUrl:
     Host aliases collapse before the query allowlist is applied, so
     ``twitter.com`` and ``x.com`` share the X allowlist. The path and query
     are percent-decoded once: ``parse_qsl`` decodes the query, and the raw
-    string is not passed through ``unquote`` first.
+    string is not passed through ``unquote`` first. ``identity`` percent-encodes
+    the stored path so a second parse does not treat leftover ``%`` escapes
+    as new sequences.
     """
 
     scheme: str
@@ -120,13 +148,23 @@ class CanonicalUrl:
     @property
     def identity(self) -> str:
         query = urlencode(self.query)
-        if self.path == "/":
+        path = _encode_identity_path(self.path)
+        if path == "/":
             base = f"{self.scheme}://{self.host}/" if query else f"{self.scheme}://{self.host}"
         else:
-            base = f"{self.scheme}://{self.host}{self.path}"
+            base = f"{self.scheme}://{self.host}{path}"
         if query:
             return f"{base}?{query}"
         return base
+
+
+def normalize(raw: str) -> str:
+    """Canonical identity string for ``raw``.
+
+    ``normalize(normalize(raw)) == normalize(raw)``. ``x.com`` and
+    ``twitter.com`` aliases share one value. Percent-escapes are decoded once.
+    """
+    return CanonicalUrl.parse(raw).identity
 
 
 @dataclass(frozen=True, slots=True)
